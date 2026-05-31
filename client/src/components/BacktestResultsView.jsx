@@ -202,7 +202,8 @@ export const BacktestResultsView = ({ results, strategy }) => {
                     const allTimes = new Set();
                     const legTimeMap = {};
                     for (const [key, tickArray] of Object.entries(chartData[date])) {
-                        if (key !== 'OVERALL_PNL' && activeStrategyKeys.has(key.split('_')[0]) && Array.isArray(tickArray)) {
+                        const sIdForMap = strategy?.isCombined ? key.split('_')[0] : (strategy?.id || 'single');
+                        if (key !== 'OVERALL_PNL' && activeStrategyKeys.has(sIdForMap) && Array.isArray(tickArray)) {
                             legTimeMap[key] = {};
                             tickArray.forEach(t => { 
                                 if (t && t.time) {
@@ -220,7 +221,7 @@ export const BacktestResultsView = ({ results, strategy }) => {
                         times.forEach(t => {
                             let totalAtTime = 0;
                             for (const key of Object.keys(legTimeMap)) {
-                                const sId = key.split('_')[0];
+                                const sId = strategy?.isCombined ? key.split('_')[0] : (strategy?.id || 'single');
                                 const multi = getEffectiveMultiplier(sId, stratDteMap[sId]);
                                 if (legTimeMap[key][t] !== undefined) legLastPnL[key] = legTimeMap[key][t];
                                 totalAtTime += ((legLastPnL[key] || 0) * multi);
@@ -1177,13 +1178,14 @@ export const BacktestResultsView = ({ results, strategy }) => {
                                 const legs = Object.keys(chartData[activeTab]).filter(k => k !== 'OVERALL_PNL');
                                 const strategyGroups = {};
                                 legs.forEach(leg => {
-                                    const sId = leg.split('_')[0];
+                                    const sId = strategy?.isCombined ? leg.split('_')[0] : (strategy?.id || 'single');
                                     if (!strategyGroups[sId]) strategyGroups[sId] = [];
                                     strategyGroups[sId].push(leg);
                                 });
                                 const firstLeg = legs[0];
                                 const rowData = chartData[activeTab][firstLeg];
                                 const formatLegName = (legKey) => {
+                                    if (!strategy?.isCombined) return legKey;
                                     const sId = legKey.split('_')[0];
                                     const strat = availableStrategies.find(s => String(s.id) === String(sId));
                                     if (strat && strat.name) {
@@ -1228,7 +1230,8 @@ export const BacktestResultsView = ({ results, strategy }) => {
                                 const allTimes = new Set();
                                 const legTimeMap = {};
                                 for (const [key, tickArray] of Object.entries(chartData[activeTab])) {
-                                    if (key !== 'OVERALL_PNL' && activeStrategyKeys.has(key.split('_')[0]) && Array.isArray(tickArray)) {
+                                    const sIdForMap = strategy?.isCombined ? key.split('_')[0] : (strategy?.id || 'single');
+                                    if (key !== 'OVERALL_PNL' && activeStrategyKeys.has(sIdForMap) && Array.isArray(tickArray)) {
                                         legTimeMap[key] = {};
                                         tickArray.forEach(t => { 
                                             if (t && t.time) {
