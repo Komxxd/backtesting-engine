@@ -5,6 +5,7 @@ node_modules/
 **/node_modules/
 **/market-data/
 data
+market-data.zip
 
 # Build outputs
 dist/

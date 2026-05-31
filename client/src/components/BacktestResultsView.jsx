@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, TrendingUp, TrendingDown, Clock, Activity, CalendarDays, Settings2, ZoomIn, ZoomOut } from 'lucide-react';
+import { X, TrendingUp, TrendingDown, Clock, Activity, CalendarDays, Settings2, ZoomIn, ZoomOut, RotateCcw } from 'lucide-react';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { StrategyConfigModal } from './StrategyConfigModal';
@@ -77,6 +77,14 @@ export const BacktestResultsView = ({ results, strategy }) => {
 
     const [selectedDTEs, setSelectedDTEs] = useState({});
     const [strategyMultipliers, setStrategyMultipliers] = useState({});
+    const [dteQuantities, setDteQuantities] = useState({}); // { strategyId: { dte: qty } }
+
+    // Helper: get effective multiplier for a strategy+DTE combo
+    const getEffectiveMultiplier = React.useCallback((sId, dte) => {
+        const dteQty = dteQuantities[sId]?.[dte];
+        if (dteQty !== undefined && dteQty !== '') return dteQty;
+        return strategyMultipliers[sId] !== undefined && strategyMultipliers[sId] !== '' ? strategyMultipliers[sId] : 1;
+    }, [dteQuantities, strategyMultipliers]);
     
     // Portfolio Risk Config
     const [portfolioMaxLoss, setPortfolioMaxLoss] = useState('');
@@ -88,6 +96,55 @@ export const BacktestResultsView = ({ results, strategy }) => {
     const [openCommonDTEDropdown, setOpenCommonDTEDropdown] = useState(false);
     const [commonDTEs, setCommonDTEs] = useState([]);
     const [openDTEDropdownFor, setOpenDTEDropdownFor] = useState(null);
+
+    // Initialize selectedDTEs and commonDTEs with all available DTEs so "All Days" starts checked
+    const [dteInitialized, setDteInitialized] = React.useState(false);
+    React.useEffect(() => {
+        if (!dteInitialized && Object.keys(availableDTEsPerStrategy).length > 0) {
+            const initial = {};
+            Object.entries(availableDTEsPerStrategy).forEach(([sId, dtes]) => {
+                initial[sId] = [...dtes];
+            });
+            setSelectedDTEs(initial);
+            setCommonDTEs([...allPossibleDTEs]);
+            setDteInitialized(true);
+        }
+    }, [availableDTEsPerStrategy, allPossibleDTEs, dteInitialized]);
+
+    const handleResetConfig = React.useCallback(() => {
+        // Reset Portfolio Risk
+        setPortfolioMaxLoss('');
+        setPortfolioTarget('');
+        setPortfolioRiskType('AMOUNT');
+        
+        // Reset strategy selection
+        const sel = new Set();
+        if (strategy?.isCombined && strategy?.strategies) {
+            strategy.strategies.forEach(s => sel.add(s.id));
+        } else if (strategy?.id) {
+            sel.add(strategy.id);
+        } else {
+            sel.add('single');
+        }
+        setSelectedStrategies(sel);
+        
+        // Reset DTEs
+        const initialDtes = {};
+        Object.entries(availableDTEsPerStrategy).forEach(([sId, dtes]) => {
+            initialDtes[sId] = [...dtes];
+        });
+        setSelectedDTEs(initialDtes);
+        setCommonDTEs([...allPossibleDTEs]);
+        
+        // Reset multipliers
+        setStrategyMultipliers({});
+        setDteQuantities({});
+        
+        // Close dropdowns
+        setOpenStrategyDropdown(false);
+        setOpenCommonDTEDropdown(false);
+        setOpenDTEDropdownFor(null);
+    }, [strategy, availableDTEsPerStrategy, allPossibleDTEs]);
 
     const filteredDailySummary = React.useMemo(() => {
         if (!dailySummary) return {};
@@ -105,7 +162,7 @@ export const BacktestResultsView = ({ results, strategy }) => {
                         if (selectedStrategies.has(sId)) {
                             const dteFilters = selectedDTEs[sId] || [];
                             if (dteFilters.length === 0 || dteFilters.includes(sData.dte)) {
-                                const multi = strategyMultipliers[sId] || 1;
+                                const multi = getEffectiveMultiplier(sId, sData.dte);
                                 dayPnL += ((sData.pnl || 0) * multi);
                                 dayTradeValue += ((sData.trade_value || 0) * multi);
                                 isTraded = true;
@@ -118,7 +175,7 @@ export const BacktestResultsView = ({ results, strategy }) => {
                     if (selectedStrategies.has(sId)) {
                         const dteFilters = selectedDTEs[sId] || [];
                         if (dteFilters.length === 0 || dteFilters.includes(dayData.dte)) {
-                            const multi = strategyMultipliers[sId] || 1;
+                            const multi = getEffectiveMultiplier(sId, dayData.dte);
                             dayPnL += ((dayData.pnl || 0) * multi);
                             dayTradeValue += ((dayData.trade_value || 0) * multi);
                             isTraded = true;
@@ -131,6 +188,17 @@ export const BacktestResultsView = ({ results, strategy }) => {
                     const timeMap = {};
                     let hasData = false;
                     
+                    // Build a map of strategyId -> dte for this day
+                    const stratDteMap = {};
+                    if (dayData.strategies) {
+                        Object.entries(dayData.strategies).forEach(([sId, sData]) => {
+                            stratDteMap[sId] = sData.dte;
+                        });
+                    } else {
+                        const sId = strategy?.id || 'single';
+                        stratDteMap[sId] = dayData.dte;
+                    }
+
                     const allTimes = new Set();
                     const legTimeMap = {};
                     for (const [key, tickArray] of Object.entries(chartData[date])) {
@@ -152,7 +220,8 @@ export const BacktestResultsView = ({ results, strategy }) => {
                         times.forEach(t => {
                             let totalAtTime = 0;
                             for (const key of Object.keys(legTimeMap)) {
-                                const multi = strategyMultipliers[key.split('_')[0]] || 1;
+                                const sId = key.split('_')[0];
+                                const multi = getEffectiveMultiplier(sId, stratDteMap[sId]);
                                 if (legTimeMap[key][t] !== undefined) legLastPnL[key] = legTimeMap[key][t];
                                 totalAtTime += ((legLastPnL[key] || 0) * multi);
                             }
@@ -192,7 +261,7 @@ export const BacktestResultsView = ({ results, strategy }) => {
             }
         });
         return filtered;
-    }, [dailySummary, chartData, selectedStrategies, selectedDTEs, strategyMultipliers, strategy, portfolioMaxLoss, portfolioTarget, portfolioRiskType]);
+    }, [dailySummary, chartData, selectedStrategies, selectedDTEs, strategyMultipliers, dteQuantities, getEffectiveMultiplier, strategy, portfolioMaxLoss, portfolioTarget, portfolioRiskType]);
 
     const isProfitable = totalPnL >= 0;
 
@@ -478,9 +547,17 @@ export const BacktestResultsView = ({ results, strategy }) => {
                             <div className="flex-1 overflow-y-auto p-4 sm:p-6 bg-slate-50 custom-scrollbar">
                                 {/* Backtest Configuration Section */}
                                 <div className="bg-white border border-slate-200 rounded-lg p-3.5 shadow-sm mb-6">
-                                    <h3 className="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-3 flex items-center gap-1.5">
-                                        <Settings2 className="h-3.5 w-3.5" /> Backtest Configuration
-                                    </h3>
+                                    <div className="flex justify-between items-center mb-3">
+                                        <h3 className="text-[11px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
+                                            <Settings2 className="h-3.5 w-3.5" /> Backtest Configuration
+                                        </h3>
+                                        <button 
+                                            onClick={handleResetConfig}
+                                            className="flex items-center gap-1 px-2 py-1 bg-slate-50 hover:bg-slate-100 text-slate-600 rounded border border-slate-200 text-[10px] font-bold transition-colors"
+                                        >
+                                            <RotateCcw className="w-3 h-3" /> Reset
+                                        </button>
+                                    </div>
                                     <div className="flex flex-wrap items-center gap-3">
                                         {/* Portfolio Risk Limits */}
                                         <div className="flex items-center gap-1.5 p-1 bg-white border border-slate-200 rounded-lg shadow-sm">
@@ -516,6 +593,66 @@ export const BacktestResultsView = ({ results, strategy }) => {
                                             </div>
                                         </div>
 
+                                        {/* Common Portfolio Qty Multiplier */}
+                                        <div className="flex items-center bg-white rounded shadow-sm border border-slate-200 h-7 text-[11px]">
+                                            <span className="text-[9px] text-slate-400 font-bold px-2 uppercase tracking-wide whitespace-nowrap">All Qty</span>
+                                            <div className="w-[1px] h-4 bg-slate-200 shrink-0"></div>
+                                            <div className="flex items-center h-full px-1.5 bg-slate-50 rounded-r">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        const currentAll = Object.values(strategyMultipliers);
+                                                        const base = currentAll.length > 0 ? Math.min(...currentAll.map(v => typeof v === 'number' ? v : 1)) : 1;
+                                                        const newVal = Math.max(0, base - 1);
+                                                        const updated = {};
+                                                        Array.from(selectedStrategies).forEach(sId => { updated[sId] = newVal; });
+                                                        setStrategyMultipliers(prev => ({ ...prev, ...updated }));
+                                                        setDteQuantities({});
+                                                    }}
+                                                    className="w-5 h-5 flex items-center justify-center rounded bg-slate-100 hover:bg-slate-200 text-slate-500 hover:text-slate-700 text-[11px] font-bold transition-colors leading-none"
+                                                >−</button>
+                                                <input
+                                                    type="number"
+                                                    min="0"
+                                                    step="0.5"
+                                                    value={(() => {
+                                                        const vals = Array.from(selectedStrategies).map(sId => strategyMultipliers[sId] !== undefined ? strategyMultipliers[sId] : 1);
+                                                        const allSame = vals.length > 0 && vals.every(v => v === vals[0]);
+                                                        return allSame ? vals[0] : '';
+                                                    })()}
+                                                    placeholder="—"
+                                                    onChange={(e) => {
+                                                        const val = e.target.value === '' ? '' : parseFloat(e.target.value);
+                                                        const updated = {};
+                                                        Array.from(selectedStrategies).forEach(sId => { updated[sId] = val; });
+                                                        setStrategyMultipliers(prev => ({ ...prev, ...updated }));
+                                                        setDteQuantities({});
+                                                    }}
+                                                    onBlur={(e) => {
+                                                        if (e.target.value === '') {
+                                                            const updated = {};
+                                                            Array.from(selectedStrategies).forEach(sId => { updated[sId] = 1; });
+                                                            setStrategyMultipliers(prev => ({ ...prev, ...updated }));
+                                                        }
+                                                    }}
+                                                    className="w-8 font-bold text-center outline-none bg-transparent text-indigo-600 focus:bg-white focus:ring-1 focus:ring-indigo-500 rounded py-0.5 transition-all [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                                                />
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        const currentAll = Object.values(strategyMultipliers);
+                                                        const base = currentAll.length > 0 ? Math.max(...currentAll.map(v => typeof v === 'number' ? v : 1)) : 1;
+                                                        const newVal = base + 1;
+                                                        const updated = {};
+                                                        Array.from(selectedStrategies).forEach(sId => { updated[sId] = newVal; });
+                                                        setStrategyMultipliers(prev => ({ ...prev, ...updated }));
+                                                        setDteQuantities({});
+                                                    }}
+                                                    className="w-5 h-5 flex items-center justify-center rounded bg-slate-100 hover:bg-slate-200 text-slate-500 hover:text-slate-700 text-[11px] font-bold transition-colors leading-none"
+                                                >+</button>
+                                                <span className="text-[10px] text-slate-400 font-bold ml-0.5">x</span>
+                                            </div>
+                                        </div>
                                         {/* Strategy Selection Dropdown */}
                                         {availableStrategies.length > 0 && (
                                             <div className="relative">
@@ -530,6 +667,21 @@ export const BacktestResultsView = ({ results, strategy }) => {
                                                     <>
                                                         <div className="fixed inset-0 z-10" onClick={() => setOpenStrategyDropdown(false)} />
                                                         <div className="absolute right-0 top-full mt-1 w-56 bg-white border border-slate-200 rounded-lg shadow-xl z-20 py-1 max-h-60 overflow-y-auto">
+                                                            <label className="flex items-center gap-2.5 px-3 py-2 hover:bg-slate-50 cursor-pointer border-b border-slate-100">
+                                                                <input 
+                                                                    type="checkbox" 
+                                                                    className="rounded border-slate-300 text-indigo-500 focus:ring-indigo-500"
+                                                                    checked={selectedStrategies.size === availableStrategies.length}
+                                                                    onChange={() => {
+                                                                        if (selectedStrategies.size === availableStrategies.length) {
+                                                                            setSelectedStrategies(new Set());
+                                                                        } else {
+                                                                            setSelectedStrategies(new Set(availableStrategies.map(s => s.id)));
+                                                                        }
+                                                                    }}
+                                                                />
+                                                                <span className="text-[11px] font-bold text-slate-700">Select All</span>
+                                                            </label>
                                                             {availableStrategies.map(strat => (
                                                                 <label key={strat.id} className="flex items-center gap-2.5 px-3 py-2 hover:bg-slate-50 cursor-pointer">
                                                                     <input 
@@ -585,8 +737,14 @@ export const BacktestResultsView = ({ results, strategy }) => {
                                                                 <input 
                                                                     type="checkbox" 
                                                                     className="rounded border-slate-300 text-indigo-500 focus:ring-indigo-500"
-                                                                    checked={commonDTEs.length === 0}
-                                                                    onChange={() => setCommonDTEs([])}
+                                                                    checked={commonDTEs.length === allPossibleDTEs.length}
+                                                                    onChange={() => {
+                                                                        if (commonDTEs.length === allPossibleDTEs.length) {
+                                                                            setCommonDTEs([]);
+                                                                        } else {
+                                                                            setCommonDTEs([...allPossibleDTEs]);
+                                                                        }
+                                                                    }}
                                                                 />
                                                                 <span className="text-[11px] font-bold text-slate-700">All Days</span>
                                                             </label>
@@ -619,6 +777,7 @@ export const BacktestResultsView = ({ results, strategy }) => {
                                             const sName = availableStrategies.find(s => s.id === sId)?.name || 'Strategy';
                                             const selDtes = selectedDTEs[sId] || [];
                                             const isOpen = openDTEDropdownFor === sId;
+                                            const defaultQty = strategyMultipliers[sId] !== undefined && strategyMultipliers[sId] !== '' ? strategyMultipliers[sId] : 1;
                                             
                                             return (
                                                 <div key={sId} className="flex items-center bg-white rounded shadow-sm border border-slate-200 h-7 text-[11px] group/widget">
@@ -635,36 +794,99 @@ export const BacktestResultsView = ({ results, strategy }) => {
                                                             {isOpen && (
                                                                 <>
                                                                     <div className="fixed inset-0 z-10" onClick={() => setOpenDTEDropdownFor(null)} />
-                                                                    <div className="absolute left-0 top-full mt-1 w-44 bg-white border border-slate-200 rounded-lg shadow-xl z-20 py-1 max-h-60 overflow-y-auto">
+                                                                    <div className="absolute left-0 top-full mt-1 w-56 bg-white border border-slate-200 rounded-lg shadow-xl z-20 py-1 max-h-60 overflow-y-auto">
                                                                         <label className="flex items-center gap-2.5 px-3 py-2 hover:bg-slate-50 cursor-pointer border-b border-slate-100">
                                                                             <input 
                                                                                 type="checkbox" 
                                                                                 className="rounded border-slate-300 text-indigo-500 focus:ring-indigo-500"
-                                                                                checked={selDtes.length === 0}
+                                                                                checked={selDtes.length === dtes.length}
                                                                                 onChange={() => {
-                                                                                    setSelectedDTEs({...selectedDTEs, [sId]: []});
+                                                                                    if (selDtes.length === dtes.length) {
+                                                                                        setSelectedDTEs({...selectedDTEs, [sId]: []});
+                                                                                    } else {
+                                                                                        setSelectedDTEs({...selectedDTEs, [sId]: [...dtes]});
+                                                                                    }
                                                                                 }}
                                                                             />
                                                                             <span className="text-[11px] font-bold text-slate-700">All Days</span>
                                                                         </label>
                                                                         {dtes.map(dte => {
                                                                             const isSelected = selDtes.includes(dte);
+                                                                            const dteQtyVal = dteQuantities[sId]?.[dte];
+                                                                            const displayQty = dteQtyVal !== undefined && dteQtyVal !== '' ? dteQtyVal : defaultQty;
                                                                             return (
-                                                                                <label key={dte} className="flex items-center gap-2.5 px-3 py-2 hover:bg-slate-50 cursor-pointer">
-                                                                                    <input 
-                                                                                        type="checkbox" 
-                                                                                        className="rounded border-slate-300 text-indigo-500 focus:ring-indigo-500"
-                                                                                        checked={isSelected}
-                                                                                        onChange={(e) => {
-                                                                                            const current = [...(selectedDTEs[sId] || [])];
-                                                                                            let updated;
-                                                                                            if (e.target.checked) updated = [...current, dte];
-                                                                                            else updated = current.filter(d => d !== dte);
-                                                                                            setSelectedDTEs({...selectedDTEs, [sId]: updated});
-                                                                                        }}
-                                                                                    />
-                                                                                    <span className="text-[11px] font-medium text-slate-700">DTE {dte}</span>
-                                                                                </label>
+                                                                                <div key={dte} className="flex items-center justify-between px-3 py-2 hover:bg-slate-50 group/dte">
+                                                                                    <label className="flex items-center gap-2.5 cursor-pointer flex-1 min-w-0">
+                                                                                        <input 
+                                                                                            type="checkbox" 
+                                                                                            className="rounded border-slate-300 text-indigo-500 focus:ring-indigo-500"
+                                                                                            checked={isSelected}
+                                                                                            onChange={(e) => {
+                                                                                                const current = [...(selectedDTEs[sId] || [])];
+                                                                                                let updated;
+                                                                                                if (e.target.checked) updated = [...current, dte];
+                                                                                                else updated = current.filter(d => d !== dte);
+                                                                                                setSelectedDTEs({...selectedDTEs, [sId]: updated});
+                                                                                            }}
+                                                                                        />
+                                                                                        <span className="text-[11px] font-medium text-slate-700">DTE {dte}</span>
+                                                                                    </label>
+                                                                                    <div className="flex items-center gap-0.5 ml-2 shrink-0">
+                                                                                        <button
+                                                                                            type="button"
+                                                                                            onClick={(e) => {
+                                                                                                e.stopPropagation();
+                                                                                                const newVal = Math.max(0, (typeof displayQty === 'number' ? displayQty : 1) - 1);
+                                                                                                setDteQuantities(prev => ({
+                                                                                                    ...prev,
+                                                                                                    [sId]: { ...(prev[sId] || {}), [dte]: newVal }
+                                                                                                }));
+                                                                                            }}
+                                                                                            className="w-5 h-5 flex items-center justify-center rounded bg-slate-100 hover:bg-slate-200 text-slate-500 hover:text-slate-700 text-[11px] font-bold transition-colors leading-none"
+                                                                                        >−</button>
+                                                                                        <input
+                                                                                            type="number"
+                                                                                            min="0"
+                                                                                            step="0.5"
+                                                                                            value={displayQty}
+                                                                                            onClick={(e) => e.stopPropagation()}
+                                                                                            onChange={(e) => {
+                                                                                                e.stopPropagation();
+                                                                                                const val = e.target.value === '' ? '' : parseFloat(e.target.value);
+                                                                                                setDteQuantities(prev => ({
+                                                                                                    ...prev,
+                                                                                                    [sId]: {
+                                                                                                        ...(prev[sId] || {}),
+                                                                                                        [dte]: val
+                                                                                                    }
+                                                                                                }));
+                                                                                            }}
+                                                                                            onBlur={(e) => {
+                                                                                                if (e.target.value === '') {
+                                                                                                    // Reset to strategy default
+                                                                                                    setDteQuantities(prev => {
+                                                                                                        const updated = { ...prev, [sId]: { ...(prev[sId] || {}) } };
+                                                                                                        delete updated[sId][dte];
+                                                                                                        return updated;
+                                                                                                    });
+                                                                                                }
+                                                                                            }}
+                                                                                            className="w-8 text-[11px] font-bold text-center outline-none bg-slate-50 border border-slate-200 text-indigo-600 focus:bg-white focus:ring-1 focus:ring-indigo-500 focus:border-indigo-400 rounded py-0.5 transition-all [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                                                                                        />
+                                                                                        <button
+                                                                                            type="button"
+                                                                                            onClick={(e) => {
+                                                                                                e.stopPropagation();
+                                                                                                const newVal = (typeof displayQty === 'number' ? displayQty : 1) + 1;
+                                                                                                setDteQuantities(prev => ({
+                                                                                                    ...prev,
+                                                                                                    [sId]: { ...(prev[sId] || {}), [dte]: newVal }
+                                                                                                }));
+                                                                                            }}
+                                                                                            className="w-5 h-5 flex items-center justify-center rounded bg-slate-100 hover:bg-slate-200 text-slate-500 hover:text-slate-700 text-[11px] font-bold transition-colors leading-none"
+                                                                                        >+</button>
+                                                                                    </div>
+                                                                                </div>
                                                                             );
                                                                         })}
                                                                     </div>
@@ -690,6 +912,12 @@ export const BacktestResultsView = ({ results, strategy }) => {
                                                             onChange={(e) => {
                                                                 const val = e.target.value === '' ? '' : parseFloat(e.target.value);
                                                                 setStrategyMultipliers({...strategyMultipliers, [sId]: val});
+                                                                // Clear per-DTE overrides when strategy qty changes so they pick up the new default
+                                                                setDteQuantities(prev => {
+                                                                    const updated = { ...prev };
+                                                                    delete updated[sId];
+                                                                    return updated;
+                                                                });
                                                             }}
                                                             onBlur={(e) => {
                                                                 if (e.target.value === '') {
@@ -972,22 +1200,26 @@ export const BacktestResultsView = ({ results, strategy }) => {
                                 let dayTradeValue = 0;
                                 const activeStrategyKeys = new Set();
                                 
+                                // Build stratDteMap for this day
+                                const stratDteMap = {};
                                 if (daySummaryRaw.strategies) {
                                     Object.entries(daySummaryRaw.strategies).forEach(([sId, sData]) => {
+                                        stratDteMap[sId] = sData.dte;
                                         if (selectedStrategies.has(sId)) {
                                             const dteFilters = selectedDTEs[sId] || [];
                                             if (dteFilters.length === 0 || dteFilters.includes(sData.dte)) {
-                                                dayTradeValue += (sData.trade_value || 0) * (strategyMultipliers[sId] || 1);
+                                                dayTradeValue += (sData.trade_value || 0) * getEffectiveMultiplier(sId, sData.dte);
                                                 activeStrategyKeys.add(sId);
                                             }
                                         }
                                     });
                                 } else {
                                     const sId = strategy?.id || 'single';
+                                    stratDteMap[sId] = daySummaryRaw.dte;
                                     if (selectedStrategies.has(sId)) {
                                         const dteFilters = selectedDTEs[sId] || [];
                                         if (dteFilters.length === 0 || dteFilters.includes(daySummaryRaw.dte)) {
-                                            dayTradeValue += (daySummaryRaw.trade_value || 0) * (strategyMultipliers[sId] || 1);
+                                            dayTradeValue += (daySummaryRaw.trade_value || 0) * getEffectiveMultiplier(sId, daySummaryRaw.dte);
                                             activeStrategyKeys.add(sId);
                                         }
                                     }
@@ -1016,7 +1248,7 @@ export const BacktestResultsView = ({ results, strategy }) => {
                                     let totalAtTime = 0;
                                     Object.keys(strategyGroups).forEach(sId => {
                                         let stratTotal = 0;
-                                        const multi = strategyMultipliers[sId] || 1;
+                                        const multi = getEffectiveMultiplier(sId, stratDteMap[sId]);
                                         strategyGroups[sId].forEach(key => {
                                             if (legTimeMap[key][t] !== undefined) legLastPnL[key] = legTimeMap[key][t];
                                             stratTotal += ((legLastPnL[key] || 0) * multi);
