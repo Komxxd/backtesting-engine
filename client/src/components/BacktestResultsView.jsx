@@ -1,41 +1,93 @@
 import React, { useState } from 'react';
-import { X, TrendingUp, TrendingDown, Clock, Activity, CalendarDays, Settings2 } from 'lucide-react';
+import { X, TrendingUp, TrendingDown, Clock, Activity, CalendarDays, Settings2, ZoomIn, ZoomOut } from 'lucide-react';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { StrategyConfigModal } from './StrategyConfigModal';
 
 export const BacktestResultsView = ({ results, strategy }) => {
-    if (!results) {
-        return (
-            <div className="h-full flex items-center justify-center">
-                <div className="text-center space-y-3">
-                    <Activity className="h-10 w-10 text-slate-300 mx-auto" />
-                    <h3 className="text-sm font-semibold text-slate-600">No Backtest Results</h3>
-                    <p className="text-xs text-slate-400">Run a backtest from the Strategies tab to see results here.</p>
-                </div>
-            </div>
-        );
-    }
-
-    const { totalPnL, dailySummary, chartData, trades } = results;
+    const { totalPnL, dailySummary, chartData, trades } = results || {};
     
     // Sort dates
     const dates = Object.keys(chartData || {}).sort();
     const [activeTab, setActiveTab] = useState('OVERVIEW');
     const [isConfigModalOpen, setIsConfigModalOpen] = useState(false);
-    const [filterDTEs, setFilterDTEs] = useState([]);
-    const [filterStrategy, setFilterStrategy] = useState('ALL');
+    const [zoomLevel, setZoomLevel] = useState(100);
+    // Extract available strategies and DTEs
+    const { availableStrategies, availableDTEsPerStrategy } = React.useMemo(() => {
+        if (!dailySummary) return { availableStrategies: [], availableDTEsPerStrategy: {} };
+        
+        const strats = new Map();
+        const dtes = {}; 
 
-    const availableDTEs = React.useMemo(() => {
-        if (!dailySummary) return [];
-        const dtes = new Set();
         Object.values(dailySummary).forEach(dayData => {
-            if (typeof dayData === 'object' && dayData.dte !== undefined) {
-                dtes.add(dayData.dte);
+            if (typeof dayData === 'object') {
+                if (dayData.strategies) {
+                    Object.entries(dayData.strategies).forEach(([sId, sData]) => {
+                        strats.set(sId, sId); 
+                        if (!dtes[sId]) dtes[sId] = new Set();
+                        if (sData.dte !== undefined) dtes[sId].add(sData.dte);
+                    });
+                } else {
+                    const sId = strategy?.id || 'single';
+                    strats.set(sId, strategy?.name || 'Strategy');
+                    if (!dtes[sId]) dtes[sId] = new Set();
+                    if (dayData.dte !== undefined) dtes[sId].add(dayData.dte);
+                }
             }
         });
-        return Array.from(dtes).sort((a, b) => a - b);
-    }, [dailySummary]);
+
+        const sortedDtes = {};
+        Object.keys(dtes).forEach(k => {
+            sortedDtes[k] = Array.from(dtes[k]).sort((a,b) => a-b);
+        });
+
+        let strategiesList = [];
+        if (strategy?.isCombined && strategy?.strategies) {
+            strategiesList = strategy.strategies.map(s => ({
+                id: s.id,
+                name: s.name || s.config?.name || 'Strategy'
+            }));
+        } else {
+            strategiesList = Array.from(strats.keys()).map(id => ({
+                id,
+                name: strats.get(id) || 'Strategy'
+            }));
+        }
+
+        return { availableStrategies: strategiesList, availableDTEsPerStrategy: sortedDtes };
+    }, [dailySummary, strategy]);
+
+    const allPossibleDTEs = React.useMemo(() => {
+        const dtes = new Set();
+        Object.values(availableDTEsPerStrategy).forEach(arr => arr.forEach(d => dtes.add(d)));
+        return Array.from(dtes).sort((a,b) => parseInt(a)-parseInt(b));
+    }, [availableDTEsPerStrategy]);
+
+    const [selectedStrategies, setSelectedStrategies] = useState(() => {
+        const sel = new Set();
+        if (strategy?.isCombined && strategy?.strategies) {
+            strategy.strategies.forEach(s => sel.add(s.id));
+        } else if (strategy?.id) {
+            sel.add(strategy.id);
+        } else {
+            sel.add('single');
+        }
+        return sel;
+    });
+
+    const [selectedDTEs, setSelectedDTEs] = useState({});
+    const [strategyMultipliers, setStrategyMultipliers] = useState({});
+    
+    // Portfolio Risk Config
+    const [portfolioMaxLoss, setPortfolioMaxLoss] = useState('');
+    const [portfolioTarget, setPortfolioTarget] = useState('');
+    const [portfolioRiskType, setPortfolioRiskType] = useState('AMOUNT'); // 'AMOUNT' or 'PERCENT'
+    
+    // UI states for dropdowns
+    const [openStrategyDropdown, setOpenStrategyDropdown] = useState(false);
+    const [openCommonDTEDropdown, setOpenCommonDTEDropdown] = useState(false);
+    const [commonDTEs, setCommonDTEs] = useState([]);
+    const [openDTEDropdownFor, setOpenDTEDropdownFor] = useState(null);
 
     const filteredDailySummary = React.useMemo(() => {
         if (!dailySummary) return {};
@@ -43,19 +95,104 @@ export const BacktestResultsView = ({ results, strategy }) => {
         const filtered = {};
         Object.entries(dailySummary).forEach(([date, dayData]) => {
             if (typeof dayData === 'object') {
-                const stratData = filterStrategy !== 'ALL' && dayData.strategies 
-                    ? (dayData.strategies[filterStrategy] || null)
-                    : dayData;
-                
-                if (stratData && stratData.dte !== undefined) {
-                    if (filterDTEs.length === 0 || filterDTEs.includes(stratData.dte)) {
-                        filtered[date] = stratData;
+                let dayPnL = 0;
+                let dayTradeValue = 0;
+                let isTraded = false;
+                const activeStrategyKeys = new Set();
+
+                if (dayData.strategies) {
+                    Object.entries(dayData.strategies).forEach(([sId, sData]) => {
+                        if (selectedStrategies.has(sId)) {
+                            const dteFilters = selectedDTEs[sId] || [];
+                            if (dteFilters.length === 0 || dteFilters.includes(sData.dte)) {
+                                const multi = strategyMultipliers[sId] || 1;
+                                dayPnL += ((sData.pnl || 0) * multi);
+                                dayTradeValue += ((sData.trade_value || 0) * multi);
+                                isTraded = true;
+                                activeStrategyKeys.add(sId);
+                            }
+                        }
+                    });
+                } else {
+                    const sId = strategy?.id || 'single';
+                    if (selectedStrategies.has(sId)) {
+                        const dteFilters = selectedDTEs[sId] || [];
+                        if (dteFilters.length === 0 || dteFilters.includes(dayData.dte)) {
+                            const multi = strategyMultipliers[sId] || 1;
+                            dayPnL += ((dayData.pnl || 0) * multi);
+                            dayTradeValue += ((dayData.trade_value || 0) * multi);
+                            isTraded = true;
+                            activeStrategyKeys.add(sId);
+                        }
                     }
+                }
+
+                if (isTraded && chartData && chartData[date] && (portfolioMaxLoss !== '' || portfolioTarget !== '')) {
+                    const timeMap = {};
+                    let hasData = false;
+                    
+                    const allTimes = new Set();
+                    const legTimeMap = {};
+                    for (const [key, tickArray] of Object.entries(chartData[date])) {
+                        if (key !== 'OVERALL_PNL' && activeStrategyKeys.has(key.split('_')[0]) && Array.isArray(tickArray)) {
+                            legTimeMap[key] = {};
+                            tickArray.forEach(t => { 
+                                if (t && t.time) {
+                                    allTimes.add(t.time);
+                                    legTimeMap[key][t.time] = t.pnl;
+                                }
+                            });
+                            hasData = true;
+                        }
+                    }
+                    
+                    if (hasData) {
+                        const times = Array.from(allTimes).sort();
+                        const legLastPnL = {};
+                        times.forEach(t => {
+                            let totalAtTime = 0;
+                            for (const key of Object.keys(legTimeMap)) {
+                                const multi = strategyMultipliers[key.split('_')[0]] || 1;
+                                if (legTimeMap[key][t] !== undefined) legLastPnL[key] = legTimeMap[key][t];
+                                totalAtTime += ((legLastPnL[key] || 0) * multi);
+                            }
+                            timeMap[t] = totalAtTime;
+                        });
+                        
+                        let clippedPnL = null;
+                        const maxL = parseFloat(portfolioMaxLoss);
+                        const maxT = parseFloat(portfolioTarget);
+                        const limitSL = portfolioRiskType === 'PERCENT' && !isNaN(maxL) ? (dayTradeValue * maxL / 100) : maxL;
+                        const limitTarget = portfolioRiskType === 'PERCENT' && !isNaN(maxT) ? (dayTradeValue * maxT / 100) : maxT;
+
+                        for (const t of times) {
+                            const pnlAtTime = timeMap[t];
+                            if (!isNaN(limitSL) && limitSL > 0 && pnlAtTime <= -limitSL) {
+                                clippedPnL = pnlAtTime;
+                                break;
+                            }
+                            if (!isNaN(limitTarget) && limitTarget > 0 && pnlAtTime >= limitTarget) {
+                                clippedPnL = pnlAtTime;
+                                break;
+                            }
+                        }
+                        if (clippedPnL !== null) {
+                            dayPnL = clippedPnL;
+                        }
+                    }
+                }
+
+                if (isTraded) {
+                    filtered[date] = {
+                        pnl: dayPnL,
+                        trade_value: dayTradeValue,
+                        pnl_percent: dayTradeValue > 0 ? (dayPnL / dayTradeValue) * 100 : 0
+                    };
                 }
             }
         });
         return filtered;
-    }, [dailySummary, filterDTEs, filterStrategy]);
+    }, [dailySummary, chartData, selectedStrategies, selectedDTEs, strategyMultipliers, strategy, portfolioMaxLoss, portfolioTarget, portfolioRiskType]);
 
     const isProfitable = totalPnL >= 0;
 
@@ -208,6 +345,34 @@ export const BacktestResultsView = ({ results, strategy }) => {
         };
     }, [filteredDailySummary]);
 
+    const groupedDates = React.useMemo(() => {
+        if (!filteredDailySummary) return {};
+        const dates = Object.keys(filteredDailySummary).sort();
+        const grouped = {};
+        dates.forEach(date => {
+            const [year, month] = date.split('-');
+            if (!grouped[year]) grouped[year] = {};
+            if (!grouped[year][month]) {
+                const monthName = new Date(parseInt(year), parseInt(month) - 1).toLocaleString('default', { month: 'long' });
+                grouped[year][month] = { name: monthName, dates: [] };
+            }
+            grouped[year][month].dates.push(date);
+        });
+        return grouped;
+    }, [filteredDailySummary]);
+
+    if (!results) {
+        return (
+            <div className="h-full flex items-center justify-center">
+                <div className="text-center space-y-3">
+                    <Activity className="h-10 w-10 text-slate-300 mx-auto" />
+                    <h3 className="text-sm font-semibold text-slate-600">No Backtest Results</h3>
+                    <p className="text-xs text-slate-400">Run a backtest from the Strategies tab to see results here.</p>
+                </div>
+            </div>
+        );
+    }
+
     return (
         <div className="w-full h-[calc(100vh-76px)] flex flex-col bg-white overflow-hidden animate-in fade-in duration-200">
             {/* Header */}
@@ -223,9 +388,6 @@ export const BacktestResultsView = ({ results, strategy }) => {
                     </div>
                     
                     <div className="flex items-center gap-4">
-                        <div className="bg-slate-800 text-slate-300 text-[10px] font-bold px-2 py-1 rounded border border-slate-700 flex items-center h-7 shadow-sm">
-                            Tested on {strategy?.config?.quantity_multiplier || 1} lot(s)
-                        </div>
                         <Button 
                             variant="outline" 
                             size="sm" 
@@ -261,29 +423,49 @@ export const BacktestResultsView = ({ results, strategy }) => {
                             </button>
                             
                             <div className="my-1 border-t border-slate-100" />
-                            {Object.keys(filteredDailySummary).sort().map(date => {
-                                const daySummary = typeof filteredDailySummary[date] === 'object' ? filteredDailySummary[date] : { pnl: filteredDailySummary[date] || 0 };
-                                const dayPnL = daySummary.pnl || 0;
-                                const isDayProfitable = dayPnL >= 0;
-                                return (
-                                    <button 
-                                        key={date}
-                                        onClick={() => setActiveTab(date)}
-                                        className={`w-full text-left px-2.5 py-1.5 rounded-md flex items-center justify-between transition-all ${
-                                            activeTab === date 
-                                                ? 'bg-white shadow-sm border border-slate-200 ring-1 ring-slate-200/50' 
-                                                : 'hover:bg-slate-100 border border-transparent'
-                                        }`}
-                                    >
-                                        <span className={`text-[11px] font-bold ${activeTab === date ? 'text-slate-800' : 'text-slate-600'}`}>
-                                            {date}
-                                        </span>
-                                        <span className={`text-[9px] font-bold ${isDayProfitable ? 'text-emerald-600' : 'text-rose-600'}`}>
-                                            {isDayProfitable ? '+' : ''}{dayPnL.toFixed(0)}
-                                        </span>
-                                    </button>
-                                );
-                            })}
+                            
+                            <div className="space-y-3 pt-1">
+                                {Object.keys(groupedDates).sort((a, b) => b.localeCompare(a)).map(year => (
+                                    <div key={year} className="space-y-1">
+                                        <div className="px-2 py-0.5 text-[10px] font-bold text-slate-400 uppercase tracking-widest sticky top-0 bg-slate-50 z-10 border-b border-slate-100/50">{year}</div>
+                                        {Object.keys(groupedDates[year]).sort((a, b) => b.localeCompare(a)).map(month => (
+                                            <div key={`${year}-${month}`} className="space-y-0.5 pl-1.5">
+                                                <div className="px-1 py-0.5 text-[9px] font-bold text-indigo-400/80 uppercase tracking-widest">{groupedDates[year][month].name}</div>
+                                                <div className="space-y-0.5 border-l-2 border-slate-100/60 ml-2 pl-2">
+                                                    {groupedDates[year][month].dates.sort((a, b) => b.localeCompare(a)).map(date => {
+                                                        const daySummary = typeof filteredDailySummary[date] === 'object' ? filteredDailySummary[date] : { pnl: filteredDailySummary[date] || 0 };
+                                                        const dayPnL = daySummary.pnl || 0;
+                                                        const isDayProfitable = dayPnL >= 0;
+                                                        
+                                                        // Format date as just DD to save space since month/year are grouped
+                                                        const dayStr = date.split('-')[2];
+                                                        
+                                                        return (
+                                                            <button 
+                                                                key={date}
+                                                                onClick={() => setActiveTab(date)}
+                                                                className={`w-full text-left px-2.5 py-1.5 rounded-md flex items-center justify-between transition-all ${
+                                                                    activeTab === date 
+                                                                        ? 'bg-white shadow-sm border border-slate-200 ring-1 ring-slate-200/50' 
+                                                                        : 'hover:bg-slate-100 border border-transparent'
+                                                                }`}
+                                                            >
+                                                                <span className={`text-[11px] font-bold ${activeTab === date ? 'text-slate-800' : 'text-slate-600'}`}>
+                                                                    {dayStr} {groupedDates[year][month].name.substring(0, 3)}
+                                                                </span>
+                                                                <span className={`text-[9px] font-bold ${isDayProfitable ? 'text-emerald-600' : 'text-rose-600'}`}>
+                                                                    {isDayProfitable ? '+' : ''}{dayPnL.toFixed(0)}
+                                                                </span>
+                                                            </button>
+                                                        );
+                                                    })}
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                ))}
+                            </div>
+
                             {Object.keys(filteredDailySummary).length === 0 && (
                                 <div className="p-2 text-center text-[10px] text-slate-500 font-medium">No dates traded</div>
                             )}
@@ -294,65 +476,243 @@ export const BacktestResultsView = ({ results, strategy }) => {
                     <div className="flex-1 flex flex-col bg-white overflow-hidden">
                         {activeTab === 'OVERVIEW' ? (
                             <div className="flex-1 overflow-y-auto p-4 sm:p-6 bg-slate-50 custom-scrollbar">
-                                <div className="flex items-center justify-between mb-4">
+                                {/* Backtest Configuration Section */}
+                                <div className="bg-white border border-slate-200 rounded-lg p-3.5 shadow-sm mb-6">
+                                    <h3 className="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-3 flex items-center gap-1.5">
+                                        <Settings2 className="h-3.5 w-3.5" /> Backtest Configuration
+                                    </h3>
+                                    <div className="flex flex-wrap items-center gap-3">
+                                        {/* Portfolio Risk Limits */}
+                                        <div className="flex items-center gap-1.5 p-1 bg-white border border-slate-200 rounded-lg shadow-sm">
+                                            <div className="flex items-center bg-slate-50 border border-slate-200 rounded text-[10px] font-bold overflow-hidden h-7">
+                                                <button
+                                                    onClick={() => setPortfolioRiskType('AMOUNT')}
+                                                    className={`px-2 h-full transition-colors ${portfolioRiskType === 'AMOUNT' ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:bg-slate-100'}`}
+                                                >₹</button>
+                                                <button
+                                                    onClick={() => setPortfolioRiskType('PERCENT')}
+                                                    className={`px-2 h-full border-l border-slate-200 transition-colors ${portfolioRiskType === 'PERCENT' ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:bg-slate-100'}`}
+                                                >%</button>
+                                            </div>
+                                            <div className="flex items-center px-2 h-7 bg-slate-50 border border-slate-200 rounded">
+                                                <span className="text-[10px] text-slate-400 font-bold mr-1">SL:</span>
+                                                <input 
+                                                    type="number" 
+                                                    value={portfolioMaxLoss} 
+                                                    onChange={e => setPortfolioMaxLoss(e.target.value)} 
+                                                    placeholder={portfolioRiskType === 'AMOUNT' ? "Amt" : "Pct"}
+                                                    className="w-12 bg-transparent border-none focus:ring-0 text-[10px] font-bold text-rose-600 p-0 text-right"
+                                                />
+                                            </div>
+                                            <div className="flex items-center px-2 h-7 bg-slate-50 border border-slate-200 rounded">
+                                                <span className="text-[10px] text-slate-400 font-bold mr-1">TG:</span>
+                                                <input 
+                                                    type="number" 
+                                                    value={portfolioTarget} 
+                                                    onChange={e => setPortfolioTarget(e.target.value)} 
+                                                    placeholder={portfolioRiskType === 'AMOUNT' ? "Amt" : "Pct"}
+                                                    className="w-12 bg-transparent border-none focus:ring-0 text-[10px] font-bold text-emerald-600 p-0 text-right"
+                                                />
+                                            </div>
+                                        </div>
+
+                                        {/* Strategy Selection Dropdown */}
+                                        {availableStrategies.length > 0 && (
+                                            <div className="relative">
+                                                <button 
+                                                    onClick={() => setOpenStrategyDropdown(!openStrategyDropdown)}
+                                                    className={`px-2.5 py-1.5 rounded text-[11px] font-bold border transition-all flex items-center gap-1.5 shadow-sm ${openStrategyDropdown ? 'bg-indigo-50 border-indigo-200 text-indigo-700' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'}`}
+                                                >
+                                                    Strategies
+                                                    <span className="bg-indigo-100 text-indigo-700 px-1.5 rounded-full text-[9px]">{selectedStrategies.size}</span>
+                                                </button>
+                                                {openStrategyDropdown && (
+                                                    <>
+                                                        <div className="fixed inset-0 z-10" onClick={() => setOpenStrategyDropdown(false)} />
+                                                        <div className="absolute right-0 top-full mt-1 w-56 bg-white border border-slate-200 rounded-lg shadow-xl z-20 py-1 max-h-60 overflow-y-auto">
+                                                            {availableStrategies.map(strat => (
+                                                                <label key={strat.id} className="flex items-center gap-2.5 px-3 py-2 hover:bg-slate-50 cursor-pointer">
+                                                                    <input 
+                                                                        type="checkbox" 
+                                                                        className="rounded border-slate-300 text-indigo-500 focus:ring-indigo-500"
+                                                                        checked={selectedStrategies.has(strat.id)}
+                                                                        onChange={(e) => {
+                                                                            const newSet = new Set(selectedStrategies);
+                                                                            if (e.target.checked) newSet.add(strat.id);
+                                                                            else newSet.delete(strat.id);
+                                                                            setSelectedStrategies(newSet);
+                                                                        }}
+                                                                    />
+                                                                    <span className="text-[11px] font-medium text-slate-700 truncate">{strat.name}</span>
+                                                                </label>
+                                                            ))}
+                                                        </div>
+                                                    </>
+                                                )}
+                                            </div>
+                                        )}
+
+                                        {/* Common DTE Dropdown */}
+                                        {allPossibleDTEs.length > 0 && (
+                                            <div className="relative">
+                                                <button 
+                                                    onClick={() => setOpenCommonDTEDropdown(!openCommonDTEDropdown)}
+                                                    className={`px-2.5 py-1.5 rounded text-[11px] font-bold border transition-all flex items-center gap-1.5 shadow-sm ${openCommonDTEDropdown ? 'bg-indigo-50 border-indigo-200 text-indigo-700' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'}`}
+                                                >
+                                                    Common DTE
+                                                    {commonDTEs.length > 0 && <span className="bg-indigo-100 text-indigo-700 px-1.5 rounded-full text-[9px]">{commonDTEs.length}</span>}
+                                                </button>
+                                                {openCommonDTEDropdown && (
+                                                    <>
+                                                        <div className="fixed inset-0 z-10" onClick={() => setOpenCommonDTEDropdown(false)} />
+                                                        <div className="absolute left-0 top-full mt-1 w-48 bg-white border border-slate-200 rounded-lg shadow-xl z-20 py-1 max-h-60 overflow-y-auto flex flex-col">
+                                                            <div className="p-2 border-b border-slate-100 bg-slate-50/50 sticky top-0 z-10">
+                                                                <button 
+                                                                    onClick={() => {
+                                                                        const newDtes = {};
+                                                                        Array.from(selectedStrategies).forEach(sId => {
+                                                                            newDtes[sId] = [...commonDTEs];
+                                                                        });
+                                                                        setSelectedDTEs(newDtes);
+                                                                        setOpenCommonDTEDropdown(false);
+                                                                    }}
+                                                                    className="w-full py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-[10px] font-bold rounded shadow-sm transition-colors"
+                                                                >
+                                                                    Apply to Selected Strategies
+                                                                </button>
+                                                            </div>
+                                                            <label className="flex items-center gap-2.5 px-3 py-2 hover:bg-slate-50 cursor-pointer border-b border-slate-100">
+                                                                <input 
+                                                                    type="checkbox" 
+                                                                    className="rounded border-slate-300 text-indigo-500 focus:ring-indigo-500"
+                                                                    checked={commonDTEs.length === 0}
+                                                                    onChange={() => setCommonDTEs([])}
+                                                                />
+                                                                <span className="text-[11px] font-bold text-slate-700">All Days</span>
+                                                            </label>
+                                                            {allPossibleDTEs.map(dte => {
+                                                                const isSelected = commonDTEs.includes(dte);
+                                                                return (
+                                                                    <label key={dte} className="flex items-center gap-2.5 px-3 py-2 hover:bg-slate-50 cursor-pointer">
+                                                                        <input 
+                                                                            type="checkbox" 
+                                                                            className="rounded border-slate-300 text-indigo-500 focus:ring-indigo-500"
+                                                                            checked={isSelected}
+                                                                            onChange={(e) => {
+                                                                                if (e.target.checked) setCommonDTEs([...commonDTEs, dte]);
+                                                                                else setCommonDTEs(commonDTEs.filter(d => d !== dte));
+                                                                            }}
+                                                                        />
+                                                                        <span className="text-[11px] font-medium text-slate-700">DTE {dte}</span>
+                                                                    </label>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    </>
+                                                )}
+                                            </div>
+                                        )}
+
+                                        {/* Per-Strategy DTE Dropdowns */}
+                                        {Array.from(selectedStrategies).map(sId => {
+                                            const dtes = availableDTEsPerStrategy[sId] || [];
+                                            const sName = availableStrategies.find(s => s.id === sId)?.name || 'Strategy';
+                                            const selDtes = selectedDTEs[sId] || [];
+                                            const isOpen = openDTEDropdownFor === sId;
+                                            
+                                            return (
+                                                <div key={sId} className="flex items-center bg-white rounded shadow-sm border border-slate-200 h-7 text-[11px] group/widget">
+                                                    {/* DTE Dropdown */}
+                                                    {dtes.length > 0 ? (
+                                                        <div className="relative h-full">
+                                                            <button 
+                                                                onClick={() => setOpenDTEDropdownFor(isOpen ? null : sId)}
+                                                                className={`h-full px-2.5 font-bold rounded-l transition-all flex items-center gap-1.5 ${isOpen ? 'bg-indigo-50 text-indigo-700' : 'text-slate-700 hover:bg-slate-50'}`}
+                                                            >
+                                                                <span className="max-w-[80px] truncate">{sName}</span> DTE
+                                                                {selDtes.length > 0 && <span className="bg-indigo-100 text-indigo-700 px-1.5 py-[2px] rounded-full text-[9px] font-bold leading-none">{selDtes.length}</span>}
+                                                            </button>
+                                                            {isOpen && (
+                                                                <>
+                                                                    <div className="fixed inset-0 z-10" onClick={() => setOpenDTEDropdownFor(null)} />
+                                                                    <div className="absolute left-0 top-full mt-1 w-44 bg-white border border-slate-200 rounded-lg shadow-xl z-20 py-1 max-h-60 overflow-y-auto">
+                                                                        <label className="flex items-center gap-2.5 px-3 py-2 hover:bg-slate-50 cursor-pointer border-b border-slate-100">
+                                                                            <input 
+                                                                                type="checkbox" 
+                                                                                className="rounded border-slate-300 text-indigo-500 focus:ring-indigo-500"
+                                                                                checked={selDtes.length === 0}
+                                                                                onChange={() => {
+                                                                                    setSelectedDTEs({...selectedDTEs, [sId]: []});
+                                                                                }}
+                                                                            />
+                                                                            <span className="text-[11px] font-bold text-slate-700">All Days</span>
+                                                                        </label>
+                                                                        {dtes.map(dte => {
+                                                                            const isSelected = selDtes.includes(dte);
+                                                                            return (
+                                                                                <label key={dte} className="flex items-center gap-2.5 px-3 py-2 hover:bg-slate-50 cursor-pointer">
+                                                                                    <input 
+                                                                                        type="checkbox" 
+                                                                                        className="rounded border-slate-300 text-indigo-500 focus:ring-indigo-500"
+                                                                                        checked={isSelected}
+                                                                                        onChange={(e) => {
+                                                                                            const current = [...(selectedDTEs[sId] || [])];
+                                                                                            let updated;
+                                                                                            if (e.target.checked) updated = [...current, dte];
+                                                                                            else updated = current.filter(d => d !== dte);
+                                                                                            setSelectedDTEs({...selectedDTEs, [sId]: updated});
+                                                                                        }}
+                                                                                    />
+                                                                                    <span className="text-[11px] font-medium text-slate-700">DTE {dte}</span>
+                                                                                </label>
+                                                                            );
+                                                                        })}
+                                                                    </div>
+                                                                </>
+                                                            )}
+                                                        </div>
+                                                    ) : (
+                                                        <div className="h-full px-2.5 flex items-center font-bold text-slate-700 bg-white rounded-l">
+                                                            <span className="max-w-[80px] truncate">{sName}</span>
+                                                        </div>
+                                                    )}
+                                                    
+                                                    <div className="w-[1px] h-4 bg-slate-200 shrink-0"></div>
+                                                    
+                                                    {/* Multiplier Input */}
+                                                    <div className="flex items-center h-full px-2.5 bg-slate-50 rounded-r border-l border-transparent group-hover/widget:border-slate-100 transition-colors">
+                                                        <span className="text-[9px] text-slate-400 font-bold mr-1.5 uppercase tracking-wide">Qty</span>
+                                                        <input 
+                                                            type="number" 
+                                                            min="0" 
+                                                            step="0.5"
+                                                            value={strategyMultipliers[sId] !== undefined ? strategyMultipliers[sId] : 1}
+                                                            onChange={(e) => {
+                                                                const val = e.target.value === '' ? '' : parseFloat(e.target.value);
+                                                                setStrategyMultipliers({...strategyMultipliers, [sId]: val});
+                                                            }}
+                                                            onBlur={(e) => {
+                                                                if (e.target.value === '') {
+                                                                    setStrategyMultipliers({...strategyMultipliers, [sId]: 1});
+                                                                }
+                                                            }}
+                                                            className="w-8 font-bold text-center outline-none bg-transparent text-indigo-600 focus:bg-white focus:ring-1 focus:ring-indigo-500 rounded py-0.5 transition-all"
+                                                        />
+                                                        <span className="text-[10px] text-slate-400 font-bold ml-0.5">x</span>
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+
+                                <div className="flex items-center justify-between mb-3 mt-8">
                                     <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">
                                         <CalendarDays className="h-5 w-5 text-indigo-500" />
                                         Year-wise Returns
                                     </h2>
-                                    
-                                    <div className="flex items-center gap-4 flex-wrap">
-                                        {availableDTEs.length > 0 && (
-                                            <div className="flex items-center gap-2">
-                                                <span className="text-xs font-semibold text-slate-500 mr-1">Filter DTE:</span>
-                                                <div className="flex items-center gap-1.5 flex-wrap">
-                                                    <button
-                                                        onClick={() => setFilterDTEs([])}
-                                                        className={`px-2.5 py-1 rounded text-[10px] font-bold transition-colors ${filterDTEs.length === 0 ? 'bg-indigo-500 text-white shadow-sm' : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'}`}
-                                                    >
-                                                        All
-                                                    </button>
-                                                    {availableDTEs.map(dte => (
-                                                        <button
-                                                            key={dte}
-                                                            onClick={() => {
-                                                                if (filterDTEs.includes(dte)) {
-                                                                    setFilterDTEs(filterDTEs.filter(d => d !== dte));
-                                                                } else {
-                                                                    setFilterDTEs([...filterDTEs, dte]);
-                                                                }
-                                                            }}
-                                                            className={`px-2.5 py-1 rounded text-[10px] font-bold transition-colors ${filterDTEs.includes(dte) ? 'bg-indigo-500 text-white shadow-sm' : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'}`}
-                                                        >
-                                                            DTE {dte}
-                                                        </button>
-                                                    ))}
-                                                </div>
-                                            </div>
-                                        )}
-                                        {strategy?.isCombined && strategy?.strategies?.length > 1 && (
-                                            <div className="flex items-center gap-2 md:ml-2 md:border-l md:border-slate-200 md:pl-4">
-                                                <span className="text-xs font-semibold text-slate-500 mr-1">Strategy:</span>
-                                                <div className="flex items-center gap-1.5 flex-wrap">
-                                                    <button
-                                                        onClick={() => setFilterStrategy('ALL')}
-                                                        className={`px-2.5 py-1 rounded text-[10px] font-bold transition-colors ${filterStrategy === 'ALL' ? 'bg-indigo-500 text-white shadow-sm' : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'}`}
-                                                    >
-                                                        Combined
-                                                    </button>
-                                                    {strategy.strategies.map((s, idx) => (
-                                                        <button
-                                                            key={s.id}
-                                                            onClick={() => setFilterStrategy(s.id)}
-                                                            className={`px-2.5 py-1 rounded text-[10px] font-bold transition-colors ${filterStrategy === s.id ? 'bg-indigo-500 text-white shadow-sm' : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'}`}
-                                                        >
-                                                            {s.name || s.config?.name || `Strategy ${idx + 1}`}
-                                                        </button>
-                                                    ))}
-                                                </div>
-                                            </div>
-                                        )}
-                                    </div>
                                 </div>
+
                                 <div className="bg-white border border-slate-200 rounded-lg overflow-hidden shadow-sm overflow-x-auto mb-8">
                                     <table className="w-full text-[11px] text-left">
                                         <thead className="bg-slate-100/80 text-slate-500 font-medium text-[9px] uppercase tracking-wider border-b border-slate-200">
@@ -376,7 +736,7 @@ export const BacktestResultsView = ({ results, strategy }) => {
                                         </thead>
                                         <tbody className="divide-y divide-slate-100">
                                             {analytics.map(row => {
-                                                const rmdd = row.mdd !== 0 ? Math.abs(row.total / row.mdd).toFixed(2) : '0.00';
+
                                                 
                                                 const formatMoney = (val) => {
                                                     if (!val || val === 0) return <span className="text-slate-300 font-bold">0</span>;
@@ -522,7 +882,7 @@ export const BacktestResultsView = ({ results, strategy }) => {
                                     Market Data & Actions: {activeTab}
                                 </h4>
                                 {(() => {
-                                    const activeSummary = typeof dailySummary[activeTab] === 'object' ? dailySummary[activeTab] : { pnl: dailySummary[activeTab] || 0, trade_value: 0, pnl_percent: 0 };
+                                    const activeSummary = typeof filteredDailySummary[activeTab] === 'object' ? filteredDailySummary[activeTab] : { pnl: 0, trade_value: 0, pnl_percent: 0 };
                                     const config = strategy?.config || {};
                                     const multiplier = parseFloat(config.quantity_multiplier) || 1;
                                     
@@ -547,10 +907,28 @@ export const BacktestResultsView = ({ results, strategy }) => {
                                     );
                                 })()}
                             </div>
-                            <div className="text-right">
-                                <div className="text-[9px] font-bold uppercase tracking-widest text-slate-400 mb-0.5">Daily Result</div>
+                            <div className="flex items-center gap-4 text-right">
+                                <div className="flex items-center gap-1 bg-slate-100/80 rounded-md p-1 border border-slate-200">
+                                    <button 
+                                        onClick={() => setZoomLevel(z => Math.max(50, z - 10))}
+                                        className="p-1 hover:bg-white rounded text-slate-500 hover:text-slate-700 transition-colors shadow-sm"
+                                        title="Zoom Out"
+                                    >
+                                        <ZoomOut className="w-3.5 h-3.5" />
+                                    </button>
+                                    <span className="text-[10px] font-mono font-bold text-slate-600 w-8 text-center">{zoomLevel}%</span>
+                                    <button 
+                                        onClick={() => setZoomLevel(z => Math.min(200, z + 10))}
+                                        className="p-1 hover:bg-white rounded text-slate-500 hover:text-slate-700 transition-colors shadow-sm"
+                                        title="Zoom In"
+                                    >
+                                        <ZoomIn className="w-3.5 h-3.5" />
+                                    </button>
+                                </div>
+                                <div>
+                                    <div className="text-[9px] font-bold uppercase tracking-widest text-slate-400 mb-0.5">Daily Result</div>
                                 {(() => {
-                                    const daySummary = typeof dailySummary[activeTab] === 'object' ? dailySummary[activeTab] : { pnl: dailySummary[activeTab] || 0, pnl_percent: 0 };
+                                    const daySummary = typeof filteredDailySummary[activeTab] === 'object' ? filteredDailySummary[activeTab] : { pnl: 0, pnl_percent: 0 };
                                     const dayPnL = daySummary.pnl || 0;
                                     const pnlPercent = daySummary.pnl_percent || 0;
                                     const isDayProfitable = dayPnL >= 0;
@@ -564,80 +942,259 @@ export const BacktestResultsView = ({ results, strategy }) => {
                                     );
                                 })()}
                             </div>
-                        </div>                        <div className="flex-1 overflow-auto p-0 relative custom-scrollbar bg-white">
+                        </div>
+                    </div>
+                    <div className="flex-1 overflow-auto p-0 relative custom-scrollbar bg-white">
                             {Object.keys(chartData && chartData[activeTab] ? chartData[activeTab] : {}).length > 0 ? (() => {
                                 const legs = Object.keys(chartData[activeTab]).filter(k => k !== 'OVERALL_PNL');
+                                const strategyGroups = {};
+                                legs.forEach(leg => {
+                                    const sId = leg.split('_')[0];
+                                    if (!strategyGroups[sId]) strategyGroups[sId] = [];
+                                    strategyGroups[sId].push(leg);
+                                });
                                 const firstLeg = legs[0];
                                 const rowData = chartData[activeTab][firstLeg];
+                                const formatLegName = (legKey) => {
+                                    const sId = legKey.split('_')[0];
+                                    const strat = availableStrategies.find(s => String(s.id) === String(sId));
+                                    if (strat && strat.name) {
+                                        return legKey.replace(sId, strat.name);
+                                    }
+                                    return legKey;
+                                };
+
+                                let portfolioHitTime = null;
+                                let portfolioHitAction = null;
+                                let timeMapOverall = {};
+
+                                const daySummaryRaw = typeof dailySummary[activeTab] === 'object' ? dailySummary[activeTab] : {};
+                                let dayTradeValue = 0;
+                                const activeStrategyKeys = new Set();
+                                
+                                if (daySummaryRaw.strategies) {
+                                    Object.entries(daySummaryRaw.strategies).forEach(([sId, sData]) => {
+                                        if (selectedStrategies.has(sId)) {
+                                            const dteFilters = selectedDTEs[sId] || [];
+                                            if (dteFilters.length === 0 || dteFilters.includes(sData.dte)) {
+                                                dayTradeValue += (sData.trade_value || 0) * (strategyMultipliers[sId] || 1);
+                                                activeStrategyKeys.add(sId);
+                                            }
+                                        }
+                                    });
+                                } else {
+                                    const sId = strategy?.id || 'single';
+                                    if (selectedStrategies.has(sId)) {
+                                        const dteFilters = selectedDTEs[sId] || [];
+                                        if (dteFilters.length === 0 || dteFilters.includes(daySummaryRaw.dte)) {
+                                            dayTradeValue += (daySummaryRaw.trade_value || 0) * (strategyMultipliers[sId] || 1);
+                                            activeStrategyKeys.add(sId);
+                                        }
+                                    }
+                                }
+
+                                const allTimes = new Set();
+                                const legTimeMap = {};
+                                for (const [key, tickArray] of Object.entries(chartData[activeTab])) {
+                                    if (key !== 'OVERALL_PNL' && activeStrategyKeys.has(key.split('_')[0]) && Array.isArray(tickArray)) {
+                                        legTimeMap[key] = {};
+                                        tickArray.forEach(t => { 
+                                            if (t && t.time) {
+                                                allTimes.add(t.time);
+                                                legTimeMap[key][t.time] = t.pnl;
+                                            }
+                                        });
+                                    }
+                                }
+                                
+                                const sortedTimes = Array.from(allTimes).sort();
+                                const legLastPnL = {};
+                                const timeMapStrategy = {};
+                                Object.keys(strategyGroups).forEach(sId => timeMapStrategy[sId] = {});
+
+                                sortedTimes.forEach(t => {
+                                    let totalAtTime = 0;
+                                    Object.keys(strategyGroups).forEach(sId => {
+                                        let stratTotal = 0;
+                                        const multi = strategyMultipliers[sId] || 1;
+                                        strategyGroups[sId].forEach(key => {
+                                            if (legTimeMap[key][t] !== undefined) legLastPnL[key] = legTimeMap[key][t];
+                                            stratTotal += ((legLastPnL[key] || 0) * multi);
+                                        });
+                                        timeMapStrategy[sId][t] = stratTotal;
+                                        totalAtTime += stratTotal;
+                                    });
+                                    timeMapOverall[t] = totalAtTime;
+                                });
+
+                                if (portfolioMaxLoss !== '' || portfolioTarget !== '') {
+                                    const maxL = parseFloat(portfolioMaxLoss);
+                                    const maxT = parseFloat(portfolioTarget);
+                                    const limitSL = portfolioRiskType === 'PERCENT' && !isNaN(maxL) ? (dayTradeValue * maxL / 100) : maxL;
+                                    const limitTarget = portfolioRiskType === 'PERCENT' && !isNaN(maxT) ? (dayTradeValue * maxT / 100) : maxT;
+
+                                    const times = Object.keys(timeMapOverall).sort();
+                                    for (const t of times) {
+                                        const pnlAtTime = timeMapOverall[t];
+                                        if (!isNaN(limitSL) && limitSL > 0 && pnlAtTime <= -limitSL) {
+                                            portfolioHitTime = t;
+                                            portfolioHitAction = 'PORTFOLIO_SL_HIT';
+                                            break;
+                                        }
+                                        if (!isNaN(limitTarget) && limitTarget > 0 && pnlAtTime >= limitTarget) {
+                                            portfolioHitTime = t;
+                                            portfolioHitAction = 'PORTFOLIO_TARGET_HIT';
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                const strategyHitTime = {};
+                                const strategyHitAction = {};
+
+                                Object.entries(strategyGroups).forEach(([sId, sLegs]) => {
+                                    let hitTime = null;
+                                    let hitAction = null;
+                                    
+                                    for (const leg of sLegs) {
+                                        const legData = chartData[activeTab]?.[leg] || [];
+                                        for (const node of legData) {
+                                            if (node.action) {
+                                                if (node.action.includes('[OVER_SL]')) {
+                                                    if (!hitTime || node.time < hitTime) {
+                                                        hitTime = node.time;
+                                                        hitAction = 'STRATEGY_SL_HIT';
+                                                    }
+                                                } else if (node.action.includes('[OVER_TGT]')) {
+                                                    if (!hitTime || node.time < hitTime) {
+                                                        hitTime = node.time;
+                                                        hitAction = 'STRATEGY_TARGET_HIT';
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    
+                                    if (hitTime) {
+                                        strategyHitTime[sId] = hitTime;
+                                        strategyHitAction[sId] = hitAction;
+                                    }
+                                });
                                 
                                 return (
-                                    <table className="w-full text-left border-collapse min-w-max">
-                                        <thead className="sticky top-0 z-20 backdrop-blur-sm bg-slate-100/90 shadow-sm text-[9px] uppercase tracking-wider text-slate-500">
+                                    <table className="w-full text-left border-collapse min-w-max" style={{ zoom: zoomLevel / 100 }}>
+                                        <thead className="text-[9px] uppercase tracking-wider text-slate-500">
                                             <tr>
-                                                <th rowSpan={2} className="px-3 py-2 font-bold border-b border-r border-slate-200 text-center align-middle bg-slate-200/50 shadow-[inset_0_-1px_0_rgba(0,0,0,0.1)]">
+                                                <th rowSpan={2} className="sticky left-0 top-0 z-40 px-3 py-2 font-bold border-b border-r border-slate-200 text-center align-middle bg-slate-200 shadow-[inset_0_-1px_0_rgba(0,0,0,0.1)]">
                                                     Time
                                                 </th>
-                                                {legs.map(leg => (
-                                                    <th key={leg} colSpan={6} className="px-2 py-1.5 font-extrabold border-b border-r border-slate-200 text-center text-slate-700 bg-slate-100 shadow-[inset_0_-1px_0_rgba(0,0,0,0.1)]">
-                                                        <span className={leg.includes('CE') ? 'text-emerald-600' : 'text-rose-600'}>{leg}</span>
-                                                    </th>
-                                                ))}
-                                                <th rowSpan={2} className="px-3 py-2 font-bold border-b border-slate-200 text-center align-middle bg-slate-200/50 shadow-[inset_0_-1px_0_rgba(0,0,0,0.1)] text-slate-700">
-                                                    Overall PnL
+                                                {Object.entries(strategyGroups).map(([sId, sLegs]) => {
+                                                    const strat = availableStrategies.find(s => String(s.id) === String(sId));
+                                                    const stratNameLabel = strat ? strat.name : sId;
+                                                    return (
+                                                        <React.Fragment key={`strat-group-${sId}`}>
+                                                            {sLegs.map(leg => (
+                                                                <th key={leg} colSpan={6} className="sticky top-0 z-20 px-2 py-1.5 font-extrabold border-b border-r border-slate-200 text-center text-slate-700 bg-slate-100 shadow-[inset_0_-1px_0_rgba(0,0,0,0.1)]">
+                                                                    <span className={leg.includes('CE') ? 'text-emerald-600' : 'text-rose-600'}>{formatLegName(leg)}</span>
+                                                                </th>
+                                                            ))}
+                                                            <th colSpan={2} className="sticky top-0 z-20 px-2 py-1.5 font-extrabold border-b border-r border-slate-200 text-center text-indigo-700 bg-indigo-50 shadow-[inset_0_-1px_0_rgba(0,0,0,0.1)]">
+                                                                {stratNameLabel} Overall
+                                                            </th>
+                                                        </React.Fragment>
+                                                    );
+                                                })}
+                                                <th colSpan={2} className="sticky right-0 top-0 z-40 px-3 py-2 font-bold border-b border-slate-200 text-center align-middle bg-slate-200 shadow-[inset_0_-1px_0_rgba(0,0,0,0.1)] text-slate-700">
+                                                    Overall Portfolio
                                                 </th>
                                             </tr>
                                             <tr>
-                                                {legs.map(leg => (
-                                                    <React.Fragment key={`${leg}-sub`}>
-                                                        <th className="px-2 py-1 font-semibold border-b border-slate-200 text-right bg-slate-50/80">Open</th>
-                                                        <th className="px-2 py-1 font-semibold border-b border-slate-200 text-right bg-slate-50/80">High</th>
-                                                        <th className="px-2 py-1 font-semibold border-b border-slate-200 text-right bg-slate-50/80">Low</th>
-                                                        <th className="px-2 py-1 font-semibold border-b border-slate-200 text-right bg-slate-50/80">Close</th>
-                                                        <th className="px-2 py-1 font-semibold border-b border-slate-200 text-right bg-slate-50/80">PnL</th>
-                                                        <th className="px-2 py-1 font-semibold border-b border-r border-slate-200 bg-slate-50/80">Action</th>
+                                                {Object.entries(strategyGroups).map(([sId, sLegs]) => (
+                                                    <React.Fragment key={`strat-sub-${sId}`}>
+                                                        {sLegs.map(leg => (
+                                                            <React.Fragment key={`${leg}-sub`}>
+                                                                <th className="sticky top-[29px] z-20 px-2 py-1 font-semibold border-b border-slate-200 text-right bg-slate-50 shadow-[inset_0_-1px_0_rgba(0,0,0,0.05)]">Open</th>
+                                                                <th className="sticky top-[29px] z-20 px-2 py-1 font-semibold border-b border-slate-200 text-right bg-slate-50 shadow-[inset_0_-1px_0_rgba(0,0,0,0.05)]">High</th>
+                                                                <th className="sticky top-[29px] z-20 px-2 py-1 font-semibold border-b border-slate-200 text-right bg-slate-50 shadow-[inset_0_-1px_0_rgba(0,0,0,0.05)]">Low</th>
+                                                                <th className="sticky top-[29px] z-20 px-2 py-1 font-semibold border-b border-slate-200 text-right bg-slate-50 shadow-[inset_0_-1px_0_rgba(0,0,0,0.05)]">Close</th>
+                                                                <th className="sticky top-[29px] z-20 px-2 py-1 font-semibold border-b border-slate-200 text-right bg-slate-50 shadow-[inset_0_-1px_0_rgba(0,0,0,0.05)]">PnL</th>
+                                                                <th className="sticky top-[29px] z-20 px-2 py-1 font-semibold border-b border-r border-slate-200 bg-slate-50 shadow-[inset_0_-1px_0_rgba(0,0,0,0.05)]">Action</th>
+                                                            </React.Fragment>
+                                                        ))}
+                                                        <th className="sticky top-[29px] z-20 px-2 py-1 font-semibold border-b border-r border-indigo-100 text-right bg-indigo-50 text-indigo-700 shadow-[inset_0_-1px_0_rgba(0,0,0,0.05)]">Total PnL</th>
+                                                        <th className="sticky top-[29px] z-20 px-2 py-1 font-semibold border-b border-r border-indigo-100 text-center bg-indigo-50 text-indigo-700 shadow-[inset_0_-1px_0_rgba(0,0,0,0.05)]">Action</th>
                                                     </React.Fragment>
                                                 ))}
+                                                <th className="sticky right-[110px] top-[29px] z-40 px-3 py-1 font-semibold border-b border-r border-slate-200 text-right bg-slate-100 shadow-[inset_0_-1px_0_rgba(0,0,0,0.1)]">PnL</th>
+                                                <th className="sticky right-0 top-[29px] z-40 px-3 py-1 min-w-[110px] max-w-[110px] w-[110px] font-semibold border-b border-slate-200 text-center bg-slate-100 shadow-[inset_0_-1px_0_rgba(0,0,0,0.1)]">Action</th>
                                             </tr>
                                         </thead>
                                         <tbody className="divide-y divide-slate-100 text-[10px]">
-                                            {rowData.map((row, idx) => {
-                                                const timeStr = row.time?.includes('T') ? row.time.substring(11, 16) : row.time?.substring(0, 5) || '-';
-                                                const overallRow = chartData[activeTab]['OVERALL_PNL']?.[idx];
+                                            {(portfolioHitTime ? sortedTimes.slice(0, sortedTimes.indexOf(portfolioHitTime) + 1) : sortedTimes).map((time, idx) => {
+                                                const timeStr = time?.includes('T') ? time.substring(11, 16) : time?.substring(0, 5) || '-';
+                                                const actualOverallPnL = timeMapOverall[time] !== undefined ? timeMapOverall[time] : 0;
                                                 
                                                 return (
                                                     <tr key={idx} className="hover:bg-indigo-50/40 transition-colors group">
-                                                        <td className="px-3 py-1 font-semibold text-slate-600 tabular-nums border-r border-slate-100 text-center bg-slate-50/50 group-hover:bg-indigo-50/60">
+                                                        <td className="sticky left-0 z-20 px-3 py-1 font-semibold text-slate-600 tabular-nums border-r border-slate-100 text-center bg-slate-50 group-hover:bg-indigo-50">
                                                             {timeStr}
                                                         </td>
-                                                        {legs.map(leg => {
-                                                            const legRow = chartData[activeTab][leg][idx];
-                                                            if (!legRow) return <td colSpan={6} key={`${leg}-${idx}`} className="border-r border-slate-100"></td>;
+                                                        {Object.entries(strategyGroups).map(([sId, sLegs]) => {
+                                                            const actualStratPnL = timeMapStrategy[sId][time] || 0;
                                                             return (
-                                                                <React.Fragment key={`${leg}-${idx}`}>
-                                                                    <td className="px-2 py-1 text-right font-mono text-slate-500">{legRow.open?.toFixed(2)}</td>
-                                                                    <td className="px-2 py-1 text-right font-mono text-emerald-600/80">{legRow.high?.toFixed(2)}</td>
-                                                                    <td className="px-2 py-1 text-right font-mono text-rose-600/80">{legRow.low?.toFixed(2)}</td>
-                                                                    <td className="px-2 py-1 text-right font-mono font-bold text-slate-800">{legRow.close?.toFixed(2)}</td>
-                                                                    <td className="px-2 py-1 text-right font-mono font-bold">
-                                                                        <span className={legRow.pnl > 0 ? "text-emerald-600" : legRow.pnl < 0 ? "text-rose-600" : "text-slate-400"}>
-                                                                            {legRow.pnl > 0 ? '+' : ''}{legRow.pnl?.toFixed(2) || '0.00'}
+                                                                <React.Fragment key={`strat-row-${sId}-${idx}`}>
+                                                                    {sLegs.map(leg => {
+                                                                        const legData = chartData[activeTab][leg];
+                                                                        const legRow = legData ? legData.find(r => r.time === time) : null;
+                                                                        if (!legRow) return <td colSpan={6} key={`${leg}-${idx}`} className="border-r border-slate-100 bg-slate-50/30"></td>;
+                                                                        return (
+                                                                            <React.Fragment key={`${leg}-${idx}`}>
+                                                                                <td className="px-2 py-1 text-right font-mono text-slate-500">{legRow.open?.toFixed(2)}</td>
+                                                                                <td className="px-2 py-1 text-right font-mono text-emerald-600/80">{legRow.high?.toFixed(2)}</td>
+                                                                                <td className="px-2 py-1 text-right font-mono text-rose-600/80">{legRow.low?.toFixed(2)}</td>
+                                                                                <td className="px-2 py-1 text-right font-mono font-bold text-slate-800">{legRow.close?.toFixed(2)}</td>
+                                                                                <td className="px-2 py-1 text-right font-mono font-bold">
+                                                                                    <span className={legRow.pnl > 0 ? "text-emerald-600" : legRow.pnl < 0 ? "text-rose-600" : "text-slate-400"}>
+                                                                                        {legRow.pnl > 0 ? '+' : ''}{legRow.pnl?.toFixed(2) || '0.00'}
+                                                                                    </span>
+                                                                                </td>
+                                                                                <td className="px-2 py-1 border-r border-slate-100">
+                                                                                    {legRow.action ? (
+                                                                                        <span className="text-indigo-700 bg-indigo-100/60 px-1.5 py-0.5 rounded text-[9px] inline-block shadow-sm ring-1 ring-indigo-200/50 font-medium whitespace-pre-wrap break-words" title={legRow.action}>
+                                                                                            {legRow.action}
+                                                                                        </span>
+                                                                                    ) : <span className="text-slate-300">-</span>}
+                                                                                </td>
+                                                                            </React.Fragment>
+                                                                        );
+                                                                    })}
+                                                                    <td className="px-2 py-1 border-r border-indigo-100 text-right font-mono font-black bg-indigo-50/30 group-hover:bg-indigo-100/40 text-[11px]">
+                                                                        <span className={actualStratPnL > 0 ? "text-emerald-600" : actualStratPnL < 0 ? "text-rose-600" : "text-slate-400"}>
+                                                                            {actualStratPnL > 0 ? '+' : ''}{actualStratPnL.toFixed(2)}
                                                                         </span>
                                                                     </td>
-                                                                    <td className="px-2 py-1 border-r border-slate-100">
-                                                                        {legRow.action ? (
-                                                                            <span className="text-indigo-700 bg-indigo-100/60 px-1.5 py-0.5 rounded text-[9px] inline-block shadow-sm ring-1 ring-indigo-200/50 font-medium whitespace-pre-wrap break-words" title={legRow.action}>
-                                                                                {legRow.action}
+                                                                    <td className="px-2 py-1 border-r border-indigo-100 text-center bg-indigo-50/30 group-hover:bg-indigo-100/40">
+                                                                        {time === strategyHitTime[sId] ? (
+                                                                            <span className={`text-white px-1.5 py-0.5 rounded text-[9px] inline-block shadow-sm font-bold whitespace-nowrap ${strategyHitAction[sId] === 'STRATEGY_TARGET_HIT' ? 'bg-emerald-500' : 'bg-rose-500'}`}>
+                                                                                {strategyHitAction[sId] === 'STRATEGY_TARGET_HIT' ? 'TGT HIT' : 'SL HIT'}
                                                                             </span>
-                                                                        ) : <span className="text-slate-300">-</span>}
+                                                                        ) : <span className="text-indigo-200/50">-</span>}
                                                                     </td>
                                                                 </React.Fragment>
                                                             );
                                                         })}
-                                                        <td className="px-3 py-1 text-center font-mono font-black bg-slate-50/50 group-hover:bg-indigo-50/60 text-[11px]">
-                                                            {overallRow && (
-                                                                <span className={overallRow.pnl > 0 ? "text-emerald-600" : overallRow.pnl < 0 ? "text-rose-600" : "text-slate-400"}>
-                                                                    {overallRow.pnl > 0 ? '+' : ''}{overallRow.pnl?.toFixed(2) || '0.00'}
+                                                        <td className="sticky right-[110px] z-20 px-3 py-1 text-right border-l border-r border-slate-200 font-mono font-black bg-slate-50 group-hover:bg-indigo-50 text-[11px] shadow-[-2px_0_5px_rgba(0,0,0,0.02)]">
+                                                            <span className={actualOverallPnL > 0 ? "text-emerald-600" : actualOverallPnL < 0 ? "text-rose-600" : "text-slate-400"}>
+                                                                {actualOverallPnL > 0 ? '+' : ''}{actualOverallPnL.toFixed(2)}
+                                                            </span>
+                                                        </td>
+                                                        <td className="sticky right-0 z-20 px-3 py-1 min-w-[110px] max-w-[110px] w-[110px] text-center bg-slate-50 group-hover:bg-indigo-50">
+                                                            {time === portfolioHitTime ? (
+                                                                <span className={`text-white px-1.5 py-0.5 rounded text-[9px] inline-block shadow-sm font-bold whitespace-nowrap ${portfolioHitAction === 'PORTFOLIO_TARGET_HIT' ? 'bg-emerald-500' : 'bg-rose-500'}`}>
+                                                                    {portfolioHitAction}
                                                                 </span>
+                                                            ) : (
+                                                                <span className="text-slate-300">-</span>
                                                             )}
                                                         </td>
                                                     </tr>
@@ -660,8 +1217,7 @@ export const BacktestResultsView = ({ results, strategy }) => {
             <StrategyConfigModal 
                 isOpen={isConfigModalOpen} 
                 onClose={() => setIsConfigModalOpen(false)} 
-                config={strategy?.config} 
-                strategyName={strategy?.name} 
+                strategy={strategy} 
             />
         </div>
     );

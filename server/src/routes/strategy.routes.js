@@ -241,7 +241,7 @@ router.post("/backtest/combined", async (req, res) => {
                                 existing.sort((a, b) => a.time.localeCompare(b.time));
                             }
                         } else {
-                            combined.chartData[date][`${res.trades[0]?.strategyId || 'strat'}_${key}`] = data;
+                            combined.chartData[date][`${res.strategyId || 'strat'}_${key}`] = data;
                         }
                     }
                 }

@@ -1622,7 +1622,7 @@ const EntryTimer = ({ entryTime }) => {
 // Tier 1 - Rule 1 & Phase 2: Interceptor to ensuring session key is always sent
 
 
-export const StrategyFormContent = ({ config, setConfig, editingId, setEditingId, loading, handleSave, handleBacktest, isBacktesting, isReadOnly }) => {
+export const StrategyFormContent = ({ config, setConfig, editingId, setEditingId, loading, handleSave, isReadOnly }) => {
 
     return (
         <div className={isReadOnly ? "read-only-form opacity-90" : ""}>
@@ -1900,48 +1900,8 @@ export const StrategyFormContent = ({ config, setConfig, editingId, setEditingId
                     </div>
                 )}
 
-                {handleBacktest && (
-                    <div className="w-full space-y-3 mt-4 border-t border-slate-100 pt-4">
-                        <div className="flex flex-wrap items-end gap-3 w-full">
-                            <div className="grid grid-cols-2 gap-3 flex-1 min-w-[240px]">
-                                <div className="space-y-1">
-                                    <Label className="text-[10px] font-bold uppercase tracking-tight text-slate-500">BT From Date</Label>
-                                    <Input 
-                                        className="h-9 rounded-lg text-xs font-mono font-medium border-slate-200"
-                                        type="date"
-                                        value={config.backtest_from_date || ''} 
-                                        onChange={(e) => setConfig({ ...config, backtest_from_date: e.target.value })}
-                                        placeholder="YYYY-MM-DD"
-                                    />
-                                </div>
-                                <div className="space-y-1">
-                                    <Label className="text-[10px] font-bold uppercase tracking-tight text-slate-500">BT To Date</Label>
-                                    <Input 
-                                        className="h-9 rounded-lg text-xs font-mono font-medium border-slate-200"
-                                        type="date"
-                                        value={config.backtest_to_date || ''} 
-                                        onChange={(e) => setConfig({ ...config, backtest_to_date: e.target.value })}
-                                        placeholder="YYYY-MM-DD"
-                                    />
-                                </div>
-                            </div>
-                    
-                            <div className="w-full md:w-[120px] shrink-0">
-                                <Button
-                                    variant="outline"
-                                    className="w-full h-9 gap-2 rounded-lg text-[10px] border-cyan-200 bg-cyan-50/50 text-cyan-700 hover:bg-cyan-100 font-bold shadow-sm"
-                                    onClick={handleBacktest}
-                                    disabled={isBacktesting || !config.backtest_from_date || !config.backtest_to_date}
-                                >
-                                    {isBacktesting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Database className="h-3 w-3" />}
-                                    {isBacktesting ? 'Running...' : 'Backtest'}
-                                </Button>
-                            </div>
-                        </div>
-                    </div>
-                )}
                 
-                <div className="flex items-end hide-on-readonly w-full md:w-auto mt-4 md:mt-0 pt-4 md:pt-0">
+                <div className="flex items-end hide-on-readonly w-full md:w-auto mt-4 pt-4 border-t border-slate-100 md:border-none md:mt-0 md:pt-0">
                     <Button
                         className="w-full md:w-[150px] h-9 gap-2 rounded-lg shadow-md font-medium text-[10px]"
                         onClick={handleSave}
@@ -1996,6 +1956,27 @@ export const StrategyBuilder = ({ isConnected, onBacktestComplete }) => {
     const [loadingDates, setLoadingDates] = useState(false);
     const [isBacktesting, setIsBacktesting] = useState(false);
 
+    useEffect(() => {
+        if (selectedStrategyForBacktest) {
+            const stratIdKey = Array.isArray(selectedStrategyForBacktest) 
+                ? selectedStrategyForBacktest.map(s => s.id).sort().join('_')
+                : selectedStrategyForBacktest.id;
+            const saved = localStorage.getItem(`backtest_dates_${stratIdKey}`);
+            if (saved) {
+                try {
+                    const parsed = JSON.parse(saved);
+                    if (parsed.from && parsed.to) {
+                        setDateRange(parsed);
+                        return;
+                    }
+                } catch (e) {
+                    // Ignore parsing error
+                }
+            }
+            setDateRange({ from: null, to: null });
+        }
+    }, [selectedStrategyForBacktest]);
+
     const handleDateSelect = (dateString) => {
         setDateRange(prev => {
             if (activeDateInput === 'from') {
@@ -2013,7 +1994,6 @@ export const StrategyBuilder = ({ isConnected, onBacktestComplete }) => {
             const res = await fetchBacktestDates(index);
             if (res.success) {
                 setAvailableDates(res.data);
-                setDateRange({ from: null, to: null });
             }
         } catch (e) {
             console.error("Failed to fetch dates", e);
@@ -2470,34 +2450,7 @@ export const StrategyBuilder = ({ isConnected, onBacktestComplete }) => {
                     </CardHeader>
                     {isConfigExpanded && (
                         <CardContent className="p-2 animate-in slide-in-from-top-2 duration-200">
-                            <StrategyFormContent config={config} setConfig={setConfig} editingId={editingId} setEditingId={setEditingId} loading={loading} handleSave={handleSave} handleBacktest={async () => {
-                                if (!config.backtest_from_date || !config.backtest_to_date) return;
-                                // Save first if editing, then run backtest
-                                let strategyId = editingId;
-                                if (!strategyId) {
-                                    // Must save first to get an ID
-                                    await handleSave();
-                                    // After save, find the strategy by name
-                                    const refreshed = await axios.get(`${API_BASE_URL}/strategy/user`);
-                                    const match = (refreshed.data?.data || []).find(s => s.name?.trim().toLowerCase() === config.name?.trim().toLowerCase());
-                                    if (match) strategyId = match.id;
-                                }
-                                if (!strategyId) { alert('Please save the strategy first.'); return; }
-                                setIsBacktesting(true);
-                                try {
-                                    const response = await runBacktest(strategyId, config.backtest_from_date, config.backtest_to_date);
-                                    if (response.success) {
-                                        const stratObj = savedStrategies.find(s => s.id === strategyId) || { id: strategyId, name: config.name, config };
-                                        if (onBacktestComplete) onBacktestComplete(response.data, stratObj);
-                                    } else {
-                                        alert('Backtest failed: ' + response.message);
-                                    }
-                                } catch (e) {
-                                    alert('Error during backtest: ' + e.message);
-                                } finally {
-                                    setIsBacktesting(false);
-                                }
-                            }} isBacktesting={isBacktesting} isReadOnly={false} />
+                            <StrategyFormContent config={config} setConfig={setConfig} editingId={editingId} setEditingId={setEditingId} loading={loading} handleSave={handleSave} isReadOnly={false} />
                         </CardContent >
                     )}
                 </Card >
@@ -3255,9 +3208,17 @@ export const StrategyBuilder = ({ isConnected, onBacktestComplete }) => {
                                             <Label className="text-[10px] font-bold uppercase tracking-tight text-slate-500">From Date</Label>
                                             <Input 
                                                 value={dateRange.from || ''} 
-                                                onChange={(e) => setDateRange(prev => ({ ...prev, from: e.target.value }))}
+                                                onChange={(e) => {
+                                                    let val = e.target.value.replace(/\D/g, '');
+                                                    if (val.length > 8) val = val.slice(0, 8);
+                                                    let formatted = val;
+                                                    if (val.length > 4) formatted = val.slice(0, 4) + '-' + val.slice(4);
+                                                    if (val.length > 6) formatted = formatted.slice(0, 7) + '-' + formatted.slice(7);
+                                                    setDateRange(prev => ({ ...prev, from: formatted }));
+                                                }}
                                                 onFocus={() => setActiveDateInput('from')}
                                                 placeholder="YYYY-MM-DD"
+                                                maxLength={10}
                                                 className={`h-9 rounded-lg text-xs font-mono font-medium transition-all ${activeDateInput === 'from' ? 'border-indigo-500 ring-2 ring-indigo-500/20' : 'border-slate-200'}`}
                                             />
                                         </div>
@@ -3265,9 +3226,17 @@ export const StrategyBuilder = ({ isConnected, onBacktestComplete }) => {
                                             <Label className="text-[10px] font-bold uppercase tracking-tight text-slate-500">To Date</Label>
                                             <Input 
                                                 value={dateRange.to || ''} 
-                                                onChange={(e) => setDateRange(prev => ({ ...prev, to: e.target.value }))}
+                                                onChange={(e) => {
+                                                    let val = e.target.value.replace(/\D/g, '');
+                                                    if (val.length > 8) val = val.slice(0, 8);
+                                                    let formatted = val;
+                                                    if (val.length > 4) formatted = val.slice(0, 4) + '-' + val.slice(4);
+                                                    if (val.length > 6) formatted = formatted.slice(0, 7) + '-' + formatted.slice(7);
+                                                    setDateRange(prev => ({ ...prev, to: formatted }));
+                                                }}
                                                 onFocus={() => setActiveDateInput('to')}
                                                 placeholder="YYYY-MM-DD"
+                                                maxLength={10}
                                                 className={`h-9 rounded-lg text-xs font-mono font-medium transition-all ${activeDateInput === 'to' ? 'border-indigo-500 ring-2 ring-indigo-500/20' : 'border-slate-200'}`}
                                             />
                                         </div>
@@ -3295,6 +3264,11 @@ export const StrategyBuilder = ({ isConnected, onBacktestComplete }) => {
                                     className="w-full h-9 rounded-lg text-xs font-bold gap-2 bg-slate-900 hover:bg-slate-800 text-white shadow-lg shadow-slate-900/10 transition-all active:scale-[0.98]" 
                                     disabled={!dateRange.from || !dateRange.to || loadingDates || isBacktesting}
                                     onClick={async () => {
+                                        const stratIdKey = Array.isArray(selectedStrategyForBacktest) 
+                                            ? selectedStrategyForBacktest.map(s => s.id).sort().join('_')
+                                            : selectedStrategyForBacktest.id;
+                                        localStorage.setItem(`backtest_dates_${stratIdKey}`, JSON.stringify(dateRange));
+                                        
                                         setIsBacktesting(true);
                                         try {
                                             let response;

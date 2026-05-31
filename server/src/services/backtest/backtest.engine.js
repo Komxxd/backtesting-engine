@@ -165,7 +165,7 @@ class BacktestEngine {
             // 4. Pre-load Option Data and calculate Entry Prices for all legs
             const activeLegs = [];
             const lotsize = indexName === 'NIFTY' ? 65 : (indexName === 'SENSEX' ? 20 : 1);
-            const multiplier = parseFloat(this.strategy.config.quantity_multiplier) || 1;
+            const multiplier = 1; // Forced to 1 for backtesting. Multiplier is applied dynamically in the UI.
 
             for (const leg of this.strategy.config.legs) {
                 const strikeStr = leg.strike || leg.strike_selection || "ATM";
@@ -401,7 +401,7 @@ class BacktestEngine {
                             currentClosePnL += active.lockedPnL;
 
                             if (!active.minutePnLMap) active.minutePnLMap = new Map();
-                            active.minutePnLMap.set(t, tradePnL);
+                            active.minutePnLMap.set(t, active.lockedPnL);
 
                             // Setup RE-SL if enabled
                             if (active.leg.resl_enabled && active.reentryCount < (parseInt(active.leg.max_reentry) || 1)) {
@@ -471,8 +471,8 @@ class BacktestEngine {
                                         }
                                         const closePnlDiff = active.leg.side === 'SELL' ? (active.entryPrice - node.close) : (node.close - active.entryPrice);
                                         const newTradePnL = closePnlDiff * active.qty;
-                                        active.minutePnLMap.set(t, newTradePnL);
-                                        currentClosePnL += newTradePnL;
+                                        active.minutePnLMap.set(t, active.lockedPnL + newTradePnL);
+                                        currentClosePnL += active.lockedPnL + newTradePnL;
                                     }
                                 }
                             }
@@ -483,7 +483,7 @@ class BacktestEngine {
                     if (active.state === 'WAITING_FOR_RESL_RTP') {
                         currentOpenPnL += active.lockedPnL;
                         currentClosePnL += active.lockedPnL;
-                        active.minutePnLMap.set(t, 0);
+                        active.minutePnLMap.set(t, active.lockedPnL);
                         const high = node.high;
                         const low = node.low;
                         let rtpCrossed = false;
@@ -525,8 +525,8 @@ class BacktestEngine {
                                 }
                                 const closePnlDiff = active.leg.side === 'SELL' ? (active.entryPrice - node.close) : (node.close - active.entryPrice);
                                 const newTradePnL = closePnlDiff * active.qty;
-                                active.minutePnLMap.set(t, newTradePnL);
-                                currentClosePnL += newTradePnL;
+                                active.minutePnLMap.set(t, active.lockedPnL + newTradePnL);
+                                currentClosePnL += active.lockedPnL + newTradePnL;
                             }
                         }
                         continue;
@@ -537,7 +537,7 @@ class BacktestEngine {
                     if (active.state === 'WAITING_FOR_RESL_MTP') {
                         currentOpenPnL += active.lockedPnL;
                         currentClosePnL += active.lockedPnL;
-                        active.minutePnLMap.set(t, 0);
+                        active.minutePnLMap.set(t, active.lockedPnL);
                         const high = node.high;
                         const low = node.low;
                         let mtpCrossed = false;
@@ -572,8 +572,8 @@ class BacktestEngine {
                             }
                             const closePnlDiff = active.leg.side === 'SELL' ? (active.entryPrice - node.close) : (node.close - active.entryPrice);
                             const newTradePnL = closePnlDiff * active.qty;
-                            active.minutePnLMap.set(t, newTradePnL);
-                            currentClosePnL += newTradePnL;
+                            active.minutePnLMap.set(t, active.lockedPnL + newTradePnL);
+                            currentClosePnL += active.lockedPnL + newTradePnL;
                         }
                         continue;
                     }
@@ -581,7 +581,7 @@ class BacktestEngine {
                     if (active.state === 'STOPPED_OUT') {
                         currentOpenPnL += active.lockedPnL;
                         currentClosePnL += active.lockedPnL;
-                        active.minutePnLMap.set(t, 0);
+                        active.minutePnLMap.set(t, active.lockedPnL);
                         continue;
                     }
 
@@ -599,10 +599,10 @@ class BacktestEngine {
                         currentClosePnL += legClosePnL;
                         
                         if (!active.minutePnLMap) active.minutePnLMap = new Map();
-                        active.minutePnLMap.set(t, closePnlDiff * active.qty);
+                        active.minutePnLMap.set(t, active.lockedPnL + (closePnlDiff * active.qty));
                     } else if (active.state === 'WAITING_FOR_MNTM') {
                         if (!active.minutePnLMap) active.minutePnLMap = new Map();
-                        active.minutePnLMap.set(t, 0);
+                        active.minutePnLMap.set(t, active.lockedPnL);
                     }
                 }
 
@@ -661,10 +661,20 @@ class BacktestEngine {
                     const pnlDiff = active.leg.side === 'SELL' ? (currentTrade.entryPrice - exitPrice) : (exitPrice - currentTrade.entryPrice);
                     currentTrade.tradePnL = pnlDiff * active.qty;
                     active.lockedPnL += currentTrade.tradePnL;
+                    if (active.minutePnLMap) {
+                        active.minutePnLMap.set(currentTrade.exitTime, active.lockedPnL);
+                    }
                 }
 
                 dailyPnL += active.lockedPnL;
+            }
+            
+            const exitNodeOverall = dailyOverallPnLChart.find(x => x.time === actualExitTime);
+            if (exitNodeOverall) {
+                exitNodeOverall.pnl = dailyPnL;
+            }
 
+            for (const active of activeLegs) {
                 const entrySide = active.leg.side === 'SELL' ? 'Sell' : 'Buy';
                 const exitSide = active.leg.side === 'SELL' ? 'Buy' : 'Sell';
 
