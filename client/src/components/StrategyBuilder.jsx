@@ -1939,8 +1939,7 @@ export const StrategyBuilder = ({ isConnected, onBacktestComplete }) => {
     const [logWindowOpen, setLogWindowOpen] = useState(false);
     const [logStrategyId, setLogStrategyId] = useState(null);
     const [configWindowOpen, setConfigWindowOpen] = useState(false);
-    const [viewConfig, setViewConfig] = useState(null);
-    const [viewStrategyName, setViewStrategyName] = useState('');
+    const [viewStrategy, setViewStrategy] = useState(null);
     const [searchTerm, setSearchTerm] = useState('');
     const [isConfigExpanded, setIsConfigExpanded] = useState(false);
     const [collapsedSections, setCollapsedSections] = useState({ 'saved-strategies': false });
@@ -2563,8 +2562,7 @@ export const StrategyBuilder = ({ isConnected, onBacktestComplete }) => {
                                                                 className="h-8 w-8 rounded-md text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 border border-transparent hover:border-indigo-100"
                                                                 title="View Config"
                                                                 onClick={() => {
-                                                                    setViewConfig(strategyData.config);
-                                                                    setViewStrategyName(strategyData.name || strategyData.config?.name || 'Strategy');
+                                                                    setViewStrategy(strategyData);
                                                                     setConfigWindowOpen(true);
                                                                 }}
                                                             >
@@ -3125,8 +3123,7 @@ export const StrategyBuilder = ({ isConnected, onBacktestComplete }) => {
                                                                         variant="outline"
                                                                         className="h-8 xl:h-7 px-3 gap-1 rounded-md text-[11px] xl:text-[10px] font-medium border-slate-200 hover:bg-slate-50 text-slate-600 shadow-sm flex-1 xl:flex-none"
                                                                         onClick={() => {
-                                                                            setViewConfig(s.config);
-                                                                            setViewStrategyName(s.name || s.config?.name || 'Strategy');
+                                                                            setViewStrategy(s);
                                                                             setConfigWindowOpen(true);
                                                                         }}
                                                                     >
@@ -3167,8 +3164,7 @@ export const StrategyBuilder = ({ isConnected, onBacktestComplete }) => {
                 <StrategyConfigModal
                     isOpen={configWindowOpen}
                     onClose={() => setConfigWindowOpen(false)}
-                    config={viewConfig}
-                    strategyName={viewStrategyName}
+                    strategy={viewStrategy}
                 />
                 <ExecutionSettingsModal
                     isOpen={executionModalOpen}
