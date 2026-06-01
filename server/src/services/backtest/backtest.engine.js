@@ -372,15 +372,8 @@ class BacktestEngine {
 
                         // 2. Evaluate if SL was hit
                         if (active.slPrice !== null) {
-                            if (isTslEnabled) {
-                                // For trailing sl, we check the close to see if our sl was hit
-                                if (active.leg.side === 'SELL' && node.close >= active.slPrice) hitSL = true;
-                                if (active.leg.side === 'BUY' && node.close <= active.slPrice) hitSL = true;
-                            } else {
-                                // For normal sl (without trail), we check the high-low range
-                                if (active.leg.side === 'SELL' && node.high >= active.slPrice) hitSL = true;
-                                if (active.leg.side === 'BUY' && node.low <= active.slPrice) hitSL = true;
-                            }
+                            if (active.leg.side === 'SELL' && node.high >= active.slPrice) hitSL = true;
+                            if (active.leg.side === 'BUY' && node.low <= active.slPrice) hitSL = true;
                         }
 
                         if (hitSL) {
