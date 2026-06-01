@@ -430,30 +430,37 @@ class BacktestEngine {
                                     active.mtp = null;
                                 }
                             } else if (active.leg.resl_enabled && active.reentryCount < (parseInt(active.leg.max_reentry) || 1)) {
-                                const slMode = active.leg.resl_mode || "RESL_PLUS_PCT";
-                                const slValue = parseFloat(active.leg.resl_value || 0);
-                                let reslTarget = active.slPrice;
-                                if (slMode === "RESL_PLUS_PCT") reslTarget = reslTarget + (reslTarget * slValue / 100);
-                                else if (slMode === "RESL_PLUS_PTS") reslTarget = reslTarget + slValue;
-                                else if (slMode === "RESL_MINUS_PCT") reslTarget = reslTarget - (reslTarget * slValue / 100);
-                                else if (slMode === "RESL_MINUS_PTS") reslTarget = reslTarget - slValue;
-                                
-                                active.rtp = roundToTick(reslTarget);
+                                if (active.reentryCount === 0 || active.reslRtpLocked === undefined) {
+                                    const slMode = active.leg.resl_mode || "RESL_PLUS_PCT";
+                                    const slValue = parseFloat(active.leg.resl_value || 0);
+                                    let reslTarget = active.slPrice;
+                                    if (slMode === "RESL_PLUS_PCT") reslTarget = reslTarget + (reslTarget * slValue / 100);
+                                    else if (slMode === "RESL_PLUS_PTS") reslTarget = reslTarget + slValue;
+                                    else if (slMode === "RESL_MINUS_PCT") reslTarget = reslTarget - (reslTarget * slValue / 100);
+                                    else if (slMode === "RESL_MINUS_PTS") reslTarget = reslTarget - slValue;
+                                    
+                                    active.reslRtpLocked = roundToTick(reslTarget);
+                                    
+                                    if (active.leg.resl_mntm_enabled) {
+                                        const mntmMode = active.leg.resl_mntm_mode || "RESL_PLUS_PCT";
+                                        const mntmValue = parseFloat(active.leg.resl_mntm_value || 0);
+                                        let mntmTarget = active.reslRtpLocked;
+                                        if (mntmMode.includes("PLUS_PCT") || mntmMode === "PERCENTAGE") mntmTarget += (mntmTarget * mntmValue / 100);
+                                        else if (mntmMode.includes("PLUS_PTS") || mntmMode === "POINTS") mntmTarget += mntmValue;
+                                        else if (mntmMode.includes("MINUS_PCT")) mntmTarget -= (mntmTarget * mntmValue / 100);
+                                        else if (mntmMode.includes("MINUS_PTS")) mntmTarget -= mntmValue;
+                                        active.reslMtpLocked = roundToTick(mntmTarget);
+                                    } else {
+                                        active.reslMtpLocked = null;
+                                    }
+                                }
+
+                                active.rtp = active.reslRtpLocked;
+                                active.mtp = active.reslMtpLocked;
                                 active.state = 'WAITING_FOR_RESL_RTP';
                                 currentTrade.reentryCalcStr = `Calc RTP: ₹${active.rtp.toFixed(2)}`;
-                                
-                                if (active.leg.resl_mntm_enabled) {
-                                    const mntmMode = active.leg.resl_mntm_mode || "RESL_PLUS_PCT";
-                                    const mntmValue = parseFloat(active.leg.resl_mntm_value || 0);
-                                    let mntmTarget = active.rtp;
-                                    if (mntmMode.includes("PLUS_PCT") || mntmMode === "PERCENTAGE") mntmTarget += (mntmTarget * mntmValue / 100);
-                                    else if (mntmMode.includes("PLUS_PTS") || mntmMode === "POINTS") mntmTarget += mntmValue;
-                                    else if (mntmMode.includes("MINUS_PCT")) mntmTarget -= (mntmTarget * mntmValue / 100);
-                                    else if (mntmMode.includes("MINUS_PTS")) mntmTarget -= mntmValue;
-                                    active.mtp = roundToTick(mntmTarget);
+                                if (active.mtp !== null) {
                                     currentTrade.reentryCalcStr += ` | Calc MTP: ₹${active.mtp.toFixed(2)}`;
-                                } else {
-                                    active.mtp = null;
                                 }
 
                                 const closePrice = node.close;
