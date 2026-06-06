@@ -337,8 +337,7 @@ export const StrategyHistory = () => {
                 <StrategyConfigModal
                     isOpen={!!selectedConfig}
                     onClose={() => setSelectedConfig(null)}
-                    config={selectedConfig.config}
-                    strategyName={selectedConfig.name}
+                    strategy={selectedConfig}
                 />
             )}
         </div>

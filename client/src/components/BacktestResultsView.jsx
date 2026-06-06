@@ -90,6 +90,8 @@ export const BacktestResultsView = ({ results, strategy }) => {
     const [portfolioMaxLoss, setPortfolioMaxLoss] = useState('');
     const [portfolioTarget, setPortfolioTarget] = useState('');
     const [portfolioRiskType, setPortfolioRiskType] = useState('AMOUNT'); // 'AMOUNT' or 'PERCENT'
+    const [earlyProfitValue, setEarlyProfitValue] = useState('');
+    const [earlyProfitTime, setEarlyProfitTime] = useState('');
     
     // UI states for dropdowns
     const [openStrategyDropdown, setOpenStrategyDropdown] = useState(false);
@@ -116,6 +118,8 @@ export const BacktestResultsView = ({ results, strategy }) => {
         setPortfolioMaxLoss('');
         setPortfolioTarget('');
         setPortfolioRiskType('AMOUNT');
+        setEarlyProfitValue('');
+        setEarlyProfitTime('');
         
         // Reset strategy selection
         const sel = new Set();
@@ -184,7 +188,7 @@ export const BacktestResultsView = ({ results, strategy }) => {
                     }
                 }
 
-                if (isTraded && chartData && chartData[date] && (portfolioMaxLoss !== '' || portfolioTarget !== '')) {
+                if (isTraded && chartData && chartData[date] && (portfolioMaxLoss !== '' || portfolioTarget !== '' || earlyProfitValue !== '')) {
                     const timeMap = {};
                     let hasData = false;
                     
@@ -245,6 +249,13 @@ export const BacktestResultsView = ({ results, strategy }) => {
                                 clippedPnL = pnlAtTime;
                                 break;
                             }
+                            // Early Profit Exit: if PnL reaches target before the configured time
+                            const earlyVal = parseFloat(earlyProfitValue);
+                            const earlyTime = earlyProfitTime ? earlyProfitTime.substring(0, 5) : '';
+                            if (!isNaN(earlyVal) && earlyVal > 0 && earlyTime && t < earlyTime && pnlAtTime >= earlyVal) {
+                                clippedPnL = pnlAtTime;
+                                break;
+                            }
                         }
                         if (clippedPnL !== null) {
                             dayPnL = clippedPnL;
@@ -262,7 +273,7 @@ export const BacktestResultsView = ({ results, strategy }) => {
             }
         });
         return filtered;
-    }, [dailySummary, chartData, selectedStrategies, selectedDTEs, strategyMultipliers, dteQuantities, getEffectiveMultiplier, strategy, portfolioMaxLoss, portfolioTarget, portfolioRiskType]);
+    }, [dailySummary, chartData, selectedStrategies, selectedDTEs, strategyMultipliers, dteQuantities, getEffectiveMultiplier, strategy, portfolioMaxLoss, portfolioTarget, portfolioRiskType, earlyProfitValue, earlyProfitTime]);
 
     const isProfitable = totalPnL >= 0;
 
@@ -590,6 +601,29 @@ export const BacktestResultsView = ({ results, strategy }) => {
                                                     onChange={e => setPortfolioTarget(e.target.value)} 
                                                     placeholder={portfolioRiskType === 'AMOUNT' ? "Amt" : "Pct"}
                                                     className="w-12 bg-transparent border-none focus:ring-0 text-[10px] font-bold text-emerald-600 p-0 text-right"
+                                                />
+                                            </div>
+                                        </div>
+
+                                        {/* Early Profit Exit */}
+                                        <div className="flex items-center gap-1.5 p-1 bg-white border border-blue-200 rounded-lg shadow-sm">
+                                            <div className="flex items-center px-2 h-7 bg-blue-50 border border-blue-200 rounded">
+                                                <span className="text-[10px] text-blue-400 font-bold mr-1 whitespace-nowrap">EP ₹:</span>
+                                                <input 
+                                                    type="number" 
+                                                    value={earlyProfitValue} 
+                                                    onChange={e => setEarlyProfitValue(e.target.value)} 
+                                                    placeholder="Amt"
+                                                    className="w-12 bg-transparent border-none focus:ring-0 text-[10px] font-bold text-blue-600 p-0 text-right"
+                                                />
+                                            </div>
+                                            <div className="flex items-center px-2 h-7 bg-blue-50 border border-blue-200 rounded">
+                                                <span className="text-[10px] text-blue-400 font-bold mr-1">By:</span>
+                                                <input 
+                                                    type="time" 
+                                                    value={earlyProfitTime} 
+                                                    onChange={e => setEarlyProfitTime(e.target.value)} 
+                                                    className="w-16 bg-transparent border-none focus:ring-0 text-[10px] font-bold text-blue-600 p-0"
                                                 />
                                             </div>
                                         </div>
@@ -1127,11 +1161,19 @@ export const BacktestResultsView = ({ results, strategy }) => {
                                         overallTgtStr = config.overall_target_type === 'AMOUNT' ? `₹${(val * multiplier).toLocaleString()}` : `${val}%`;
                                     }
 
+                                    let earlyProfitStr = null;
+                                    if (earlyProfitValue !== '' && parseFloat(earlyProfitValue) > 0) {
+                                        const val = parseFloat(earlyProfitValue);
+                                        const time = earlyProfitTime ? earlyProfitTime.substring(0, 5) : '??:??';
+                                        earlyProfitStr = `₹${val.toLocaleString()} before ${time}`;
+                                    }
+
                                     return (
                                         <div className="flex items-center gap-3 text-[10px] text-slate-500">
                                             <span>Trade Value: <strong className="text-slate-700">₹{Math.round(activeSummary.trade_value || 0).toLocaleString()}</strong></span>
                                             {overallSlStr && <span>• Target SL: <strong className="text-rose-600">{overallSlStr}</strong></span>}
                                             {overallTgtStr && <span>• Target Profit: <strong className="text-emerald-600">{overallTgtStr}</strong></span>}
+                                            {earlyProfitStr && <span>• Early Exit: <strong className="text-blue-600">{earlyProfitStr}</strong></span>}
                                         </div>
                                     );
                                 })()}
@@ -1262,11 +1304,14 @@ export const BacktestResultsView = ({ results, strategy }) => {
                                     timeMapOverall[t] = totalAtTime;
                                 });
 
-                                if (portfolioMaxLoss !== '' || portfolioTarget !== '') {
+                                if (portfolioMaxLoss !== '' || portfolioTarget !== '' || earlyProfitValue !== '') {
                                     const maxL = parseFloat(portfolioMaxLoss);
                                     const maxT = parseFloat(portfolioTarget);
                                     const limitSL = portfolioRiskType === 'PERCENT' && !isNaN(maxL) ? (dayTradeValue * maxL / 100) : maxL;
                                     const limitTarget = portfolioRiskType === 'PERCENT' && !isNaN(maxT) ? (dayTradeValue * maxT / 100) : maxT;
+
+                                    const earlyVal = parseFloat(earlyProfitValue);
+                                    const earlyTime = earlyProfitTime ? earlyProfitTime.substring(0, 5) : '';
 
                                     const times = Object.keys(timeMapOverall).sort();
                                     for (const t of times) {
@@ -1279,6 +1324,11 @@ export const BacktestResultsView = ({ results, strategy }) => {
                                         if (!isNaN(limitTarget) && limitTarget > 0 && pnlAtTime >= limitTarget) {
                                             portfolioHitTime = t;
                                             portfolioHitAction = 'PORTFOLIO_TARGET_HIT';
+                                            break;
+                                        }
+                                        if (!isNaN(earlyVal) && earlyVal > 0 && earlyTime && t < earlyTime && pnlAtTime >= earlyVal) {
+                                            portfolioHitTime = t;
+                                            portfolioHitAction = 'EARLY_PROFIT_EXIT';
                                             break;
                                         }
                                     }
@@ -1425,8 +1475,8 @@ export const BacktestResultsView = ({ results, strategy }) => {
                                                         </td>
                                                         <td className="sticky right-0 z-20 px-3 py-1 min-w-[110px] max-w-[110px] w-[110px] text-center bg-slate-50 group-hover:bg-indigo-50">
                                                             {time === portfolioHitTime ? (
-                                                                <span className={`text-white px-1.5 py-0.5 rounded text-[9px] inline-block shadow-sm font-bold whitespace-nowrap ${portfolioHitAction === 'PORTFOLIO_TARGET_HIT' ? 'bg-emerald-500' : 'bg-rose-500'}`}>
-                                                                    {portfolioHitAction}
+                                                                <span className={`text-white px-1.5 py-0.5 rounded text-[9px] inline-block shadow-sm font-bold whitespace-nowrap ${portfolioHitAction === 'PORTFOLIO_TARGET_HIT' ? 'bg-emerald-500' : portfolioHitAction === 'EARLY_PROFIT_EXIT' ? 'bg-blue-500' : 'bg-rose-500'}`}>
+                                                                    {portfolioHitAction === 'EARLY_PROFIT_EXIT' ? 'EARLY EXIT' : portfolioHitAction}
                                                                 </span>
                                                             ) : (
                                                                 <span className="text-slate-300">-</span>
