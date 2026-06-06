@@ -127,6 +127,12 @@ class BacktestEngine {
                 continue;
             }
             
+            const indexChartMap = new Map();
+            indexData.forEach(row => {
+                const time = this.extractTime(row);
+                if (time) indexChartMap.set(time, { close: row[0], high: row[3], low: row[4], open: row[5] });
+            });
+
             const spotPrice = indexEntryRow[5]; // open price
             const atmStrike = this.calculateATM(spotPrice, step);
             console.log(`  -> ATM Strike at ${entryTime} (Spot: ${spotPrice}): ${atmStrike}`);
@@ -696,6 +702,35 @@ class BacktestEngine {
                                         currentClosePnL += active.lockedPnL + newTradePnL;
                                     }
                                 }
+                            } else if (active.leg.re_asap_enabled && active.reentryCount < (parseInt(active.leg.re_asap_max_entries) || 1)) {
+                                active.state = 'WAITING_FOR_RE_ASAP';
+                                const indexRow = indexChartMap.get(t);
+                                if (indexRow) {
+                                    const closeSpot = indexRow.close;
+                                    const newAtmStrike = this.calculateATM(closeSpot, step);
+                                    
+                                    const strikeStr = active.leg.strike || active.leg.strike_selection || "ATM";
+                                    const match = strikeStr.match(/^([A-Z]+)(\d*)$/);
+                                    const type = match ? match[1] : "ATM";
+                                    const offset = match && match[2] ? parseInt(match[2]) : 0;
+                                    
+                                    let newTargetStrike = newAtmStrike;
+                                    if (type === "OTM") {
+                                        newTargetStrike = active.leg.option_type === "CE" ? newAtmStrike + (offset * step) : newAtmStrike - (offset * step);
+                                    } else if (type === "ITM") {
+                                        newTargetStrike = active.leg.option_type === "CE" ? newAtmStrike - (offset * step) : newAtmStrike + (offset * step);
+                                    }
+                                    active.asapNextStrike = newTargetStrike;
+                                    
+                                    const currentTrade = active.trades[active.trades.length - 1];
+                                    currentTrade.reentryCalcStr = `Spot: ${closeSpot.toFixed(2)} | Target Strike: ${newTargetStrike}_${active.leg.option_type}`;
+                                    
+                                    const idxLogInit = active.optionDayChart.findIndex(c => c.time === t);
+                                    if (idxLogInit !== -1) {
+                                        const logStr = `[RE-ASAP] Prepared Re-entry Strike: ${newTargetStrike}_${active.leg.option_type}`;
+                                        active.optionDayChart[idxLogInit].action = active.optionDayChart[idxLogInit].action ? active.optionDayChart[idxLogInit].action + ' | ' + logStr : logStr;
+                                    }
+                                }
                             }
                             continue;
                         }
@@ -1258,6 +1293,122 @@ class BacktestEngine {
                         continue;
                     }
 
+                    if (active.state === 'WAITING_FOR_RE_ASAP') {
+                        const newTargetStrike = active.asapNextStrike || active.targetStrike;
+                        
+                        if (newTargetStrike !== active.targetStrike) {
+                            const optionFilePath = path.join(__dirname, `../../../../market-data/options/${indexName}/${year}/${month}/expiry=${expiry}/date=${date}/${newTargetStrike}_${active.leg.option_type}.parquet`);
+                            const newOptionData = await this.readParquetFile(optionFilePath);
+                            
+                            if (newOptionData.length > 0) {
+                                if (!active.historicalCharts) active.historicalCharts = [];
+                                
+                                const baselinePnL = active.strikeBaselinePnL || 0;
+                                const slTime = active.trades[active.trades.length - 1]?.exitTime || t;
+                                const oldChart = active.optionDayChart.map(node => {
+                                    let pnl = 0;
+                                    if (active.minutePnLMap && active.minutePnLMap.has(node.time)) pnl = active.minutePnLMap.get(node.time) - baselinePnL;
+                                    return { ...node, pnl };
+                                }).filter(node => node.time >= (active.strikeStartTime || entryTime) && node.time <= slTime);
+                                
+                                active.historicalCharts.push({
+                                    key: `${active.targetStrike}_${active.leg.option_type}`,
+                                    chart: oldChart,
+                                    endTime: t
+                                });
+                                
+                                active.strikeStartTime = t;
+                                active.strikeBaselinePnL = active.lockedPnL;
+                                
+                                const newChartMap = new Map();
+                                const newOptionDayChart = newOptionData.map(row => {
+                                    const time = this.extractTimeOption(row);
+                                    const mapped = { time, open: row[6], high: row[4], low: row[5], close: row[0], action: null };
+                                    if (time) newChartMap.set(time, mapped);
+                                    return mapped;
+                                });
+                                
+                                active.targetStrike = newTargetStrike;
+                                active.optionData = newOptionData;
+                                active.chartMap = newChartMap;
+                                active.optionDayChart = newOptionDayChart;
+                                
+                                const idxLog = active.optionDayChart.findIndex(c => c.time === t);
+                                if (idxLog !== -1) {
+                                    active.optionDayChart[idxLog].action = `[RE-ASAP] Loaded Strike for Re-entry`;
+                                }
+                            } else {
+                                console.log(`    -> RE-ASAP Missing option data for new strike: ${newTargetStrike}_${active.leg.option_type}`);
+                            }
+                        }
+                        
+                        const newNode = active.chartMap.get(t);
+                        if (newNode) {
+                            if (active.leg.simple_mntm_enabled) {
+                                active.state = 'WAITING_FOR_MNTM';
+                                const basePrice = newNode.open;
+                                let mtp = null;
+                                let mMode = active.leg.simple_mntm_mode || 'SIMPLE_PLUS_PCT';
+                                let mVal = parseFloat(active.leg.simple_mntm_value || 0);
+                                
+                                if (mMode.includes("PLUS_PCT")) mtp = basePrice + (basePrice * mVal / 100);
+                                else if (mMode.includes("PLUS_PTS")) mtp = basePrice + mVal;
+                                else if (mMode.includes("MINUS_PCT")) mtp = basePrice - (basePrice * mVal / 100);
+                                else if (mMode.includes("MINUS_PTS")) mtp = basePrice - mVal;
+                                
+                                active.mtp = roundToTick(mtp);
+                                
+                                const idxLogUpdate = active.optionDayChart.findIndex(c => c.time === t);
+                                if (idxLogUpdate !== -1) {
+                                    active.optionDayChart[idxLogUpdate].action = (active.optionDayChart[idxLogUpdate].action ? active.optionDayChart[idxLogUpdate].action + ' | ' : '') + `[RE-ASAP] Waiting MNTM: ₹${active.mtp.toFixed(2)}`;
+                                }
+                                
+                                currentOpenPnL += active.lockedPnL;
+                                currentClosePnL += active.lockedPnL;
+                                active.minutePnLMap.set(t, active.lockedPnL);
+                                continue;
+                            } else {
+                                active.state = 'ACTIVE';
+                                active.reentryCount++;
+                                active.entryTime = t;
+                                active.entryPrice = newNode.open;
+                                
+                                active.slPrice = calculateSlPrice(active.leg, active.entryPrice, true);
+                                active.tslReferencePrice = active.entryPrice;
+                                
+                                active.trades.push({
+                                    entryTime: active.entryTime, entryPrice: active.entryPrice,
+                                    exitTime: null, exitPrice: null, exitReason: null, tradePnL: 0, tradeValue: active.entryPrice * active.qty,
+                                    tradeSlPrice: active.slPrice
+                                });
+                                dailyTradeValue += (active.entryPrice * active.qty);
+                                
+                                const idxLog = active.optionDayChart.findIndex(c => c.time === t);
+                                if (idxLog !== -1) {
+                                    const slStrLog = active.slPrice !== null ? ` | Init SL: ₹${active.slPrice.toFixed(2)}` : '';
+                                    const entrySideLog = active.leg.side === 'SELL' ? 'Sell' : 'Buy';
+                                    const actionStrLog = `Re-Entry (${entrySideLog}) [RE-ASAP]: ${active.entryPrice.toFixed(2)}${slStrLog}`;
+                                    active.optionDayChart[idxLog].action = active.optionDayChart[idxLog].action ? active.optionDayChart[idxLog].action + ' | ' + actionStrLog : actionStrLog;
+                                }
+                                
+                                const openPnlDiff = active.leg.side === 'SELL' ? (active.entryPrice - newNode.open) : (newNode.open - active.entryPrice);
+                                const newTradeOpenPnL = openPnlDiff * active.qty;
+                                const closePnlDiff = active.leg.side === 'SELL' ? (active.entryPrice - newNode.close) : (newNode.close - active.entryPrice);
+                                const newTradeClosePnL = closePnlDiff * active.qty;
+                                
+                                currentOpenPnL += active.lockedPnL + newTradeOpenPnL;
+                                currentClosePnL += active.lockedPnL + newTradeClosePnL;
+                                active.minutePnLMap.set(t, active.lockedPnL + newTradeClosePnL);
+                                continue;
+                            }
+                        }
+                        
+                        currentOpenPnL += active.lockedPnL;
+                        currentClosePnL += active.lockedPnL;
+                        active.minutePnLMap.set(t, active.lockedPnL);
+                        continue;
+                    }
+
                     if (active.state === 'ACTIVE') {
                         const openPrice = node.open;
                         const closePrice = node.close; 
@@ -1360,10 +1511,24 @@ class BacktestEngine {
                 // Process all trades for this leg
                 for (let i = 0; i < active.trades.length; i++) {
                     const trade = active.trades[i];
+                    
+                    let tradeSymbol = `${active.targetStrike}_${active.leg.option_type}`;
+                    let tradeChartRef = active.optionDayChart;
+                    
+                    if (active.historicalCharts) {
+                        for (const hist of active.historicalCharts) {
+                            if (trade.entryTime < hist.endTime) {
+                                tradeSymbol = hist.key;
+                                tradeChartRef = hist.chart;
+                                break;
+                            }
+                        }
+                    }
+
                     this.results.trades.push({
                         date: date,
                         leg_id: active.leg.id,
-                        symbol: `${active.targetStrike}_${active.leg.option_type}`,
+                        symbol: tradeSymbol,
                         side: active.leg.side,
                         entry_time: trade.entryTime,
                         entry_price: trade.entryPrice,
@@ -1379,37 +1544,46 @@ class BacktestEngine {
                     // Remove initial logging here because we now inject it dynamically on the exact minute
                     // Wait, if it wasn't MNTM, we still need to log the first entry at 09:16
                     if (i === 0 && !active.leg.simple_mntm_enabled) {
-                        const cEntryIndex = active.optionDayChart.findIndex(c => c.time === trade.entryTime);
+                        const cEntryIndex = tradeChartRef.findIndex(c => c.time === trade.entryTime);
                         if (cEntryIndex !== -1) {
                             const slStr = trade.tradeSlPrice !== null ? ` | Init SL: ₹${trade.tradeSlPrice.toFixed(2)}` : '';
                             const actionStr = `Entry (${entrySide}): ${trade.entryPrice.toFixed(2)}${slStr}`;
-                            active.optionDayChart[cEntryIndex].action = active.optionDayChart[cEntryIndex].action ? active.optionDayChart[cEntryIndex].action + ' | ' + actionStr : actionStr;
+                            tradeChartRef[cEntryIndex].action = tradeChartRef[cEntryIndex].action ? tradeChartRef[cEntryIndex].action + ' | ' + actionStr : actionStr;
                         }
                     }
                     
-                    const cExitIndex = active.optionDayChart.findIndex(c => c.time === trade.exitTime);
+                    const cExitIndex = tradeChartRef.findIndex(c => c.time === trade.exitTime);
                     if (cExitIndex !== -1) {
                         const reCalcStr = trade.reentryCalcStr ? ` | ${trade.reentryCalcStr}` : '';
                         const pnlColorStr = trade.tradePnL >= 0 ? '+' : '';
                         const pnlStr = ` | Locked PnL: ${pnlColorStr}₹${trade.tradePnL.toFixed(2)}`;
                         const actionStr = `Exit (${exitSide}) [${trade.exitReason}]: ${trade.exitPrice.toFixed(2)}${reCalcStr}${pnlStr}`;
-                        active.optionDayChart[cExitIndex].action = active.optionDayChart[cExitIndex].action ? active.optionDayChart[cExitIndex].action + ' | ' + actionStr : actionStr;
+                        tradeChartRef[cExitIndex].action = tradeChartRef[cExitIndex].action ? tradeChartRef[cExitIndex].action + ' | ' + actionStr : actionStr;
                     }
                 }
 
+                const startTime = active.strikeStartTime || entryTime;
+                const baselinePnL = active.strikeBaselinePnL || 0;
                 active.optionDayChart = active.optionDayChart.map(node => {
                     let pnl = 0;
-                    if (active.minutePnLMap && active.minutePnLMap.has(node.time)) pnl = active.minutePnLMap.get(node.time);
+                    if (active.minutePnLMap && active.minutePnLMap.has(node.time)) pnl = active.minutePnLMap.get(node.time) - baselinePnL;
                     else if (node.time > actualExitTime) pnl = 0;
                     return { ...node, pnl };
-                }).filter(node => node.time >= entryTime && node.time <= actualExitTime);
+                }).filter(node => node.time >= startTime && node.time <= actualExitTime);
+
+                if (active.historicalCharts) {
+                    active.historicalCharts.forEach(hist => {
+                        dayChart[hist.key] = hist.chart;
+                    });
+                }
 
                 dayChart[`${active.targetStrike}_${active.leg.option_type}`] = active.optionDayChart;
+                
                 console.log(`    -> ${active.leg.side} ${active.qty}x ${active.targetStrike}_${active.leg.option_type} | Total PnL: ${active.lockedPnL.toFixed(2)} | Trades: ${active.trades.length}`);
             }
             
-            const fullDayOverallPnLChart = activeLegs[0].optionDayChart.map(node => {
-                const t = node.time;
+            const allDayTimes = Array.from(indexChartMap.keys()).sort();
+            const fullDayOverallPnLChart = allDayTimes.map(t => {
                 const matched = dailyOverallPnLChart.find(x => x.time === t);
                 if (matched) return { time: t, pnl: matched.pnl };
                 if (t < entryTime) return { time: t, pnl: 0 };
