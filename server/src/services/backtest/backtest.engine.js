@@ -536,6 +536,166 @@ class BacktestEngine {
                                         currentClosePnL += active.lockedPnL + newTradePnL;
                                     }
                                 }
+                            } else if (active.leg.rehigh_enabled && active.reentryCount < (parseInt(active.leg.max_reentry) || 1)) {
+                                active.rehighPeak = exitPrice;
+                                if (node.close > active.rehighPeak) {
+                                    active.rehighPeak = node.close;
+                                }
+                                active.state = 'WAITING_FOR_REHIGH_RTP';
+
+                                const mode = active.leg.rehigh_mode || "REHIGH_MINUS_PTS";
+                                const val = parseFloat(active.leg.rehigh_value || 0);
+                                let rtp = active.rehighPeak;
+                                if (mode === "REHIGH_MINUS_PCT") rtp = active.rehighPeak - (active.rehighPeak * val / 100);
+                                else if (mode === "REHIGH_MINUS_PTS") rtp = active.rehighPeak - val;
+                                active.rtp = roundToTick(rtp);
+
+                                if (active.leg.rehigh_mntm_enabled) {
+                                    const mntmMode = active.leg.rehigh_mntm_mode || "REHIGH_PLUS_PCT";
+                                    const mntmVal = parseFloat(active.leg.rehigh_mntm_value || 0);
+                                    let mtp = active.rtp;
+                                    if (mntmMode === "REHIGH_PLUS_PCT" || mntmMode === "PLUS_PCT" || mntmMode === "PERCENTAGE") mtp = active.rtp + (active.rtp * mntmVal / 100);
+                                    else if (mntmMode === "REHIGH_PLUS_PTS" || mntmMode === "PLUS_PTS" || mntmMode === "POINTS") mtp = active.rtp + mntmVal;
+                                    else if (mntmMode === "REHIGH_MINUS_PCT" || mntmMode === "MINUS_PCT") mtp = active.rtp - (active.rtp * mntmVal / 100);
+                                    else if (mntmMode === "REHIGH_MINUS_PTS" || mntmMode === "MINUS_PTS") mtp = active.rtp - mntmVal;
+                                    active.mtp = roundToTick(mtp);
+                                } else {
+                                    active.mtp = null;
+                                }
+
+                                currentTrade.reentryCalcStr = `Calc RTP: ₹${active.rtp.toFixed(2)}`;
+                                if (active.mtp !== null) {
+                                    currentTrade.reentryCalcStr += ` | Calc MTP: ₹${active.mtp.toFixed(2)}`;
+                                }
+
+                                const idxLogInit = active.optionDayChart.findIndex(c => c.time === t);
+                                if (idxLogInit !== -1) {
+                                    let logStr = `[RE-HIGH] Initial Peak: ₹${active.rehighPeak.toFixed(2)} | RTP: ₹${active.rtp.toFixed(2)}`;
+                                    if (active.mtp !== null) logStr += ` | MTP: ₹${active.mtp.toFixed(2)}`;
+                                    active.optionDayChart[idxLogInit].action = active.optionDayChart[idxLogInit].action ? active.optionDayChart[idxLogInit].action + ' | ' + logStr : logStr;
+                                }
+
+                                let rtpCrossed = false;
+                                if (active.rtp <= active.rehighPeak && active.rtp >= node.close) {
+                                    rtpCrossed = true;
+                                }
+
+                                if (rtpCrossed) {
+                                    if (active.mtp) {
+                                        active.state = 'WAITING_FOR_REHIGH_MTP';
+                                        if (node.time) {
+                                            const idx = active.optionDayChart.findIndex(c => c.time === node.time);
+                                            if (idx !== -1) active.optionDayChart[idx].action = (active.optionDayChart[idx].action ? active.optionDayChart[idx].action + ' | ' : '') + `[RTP Hit] Waiting MTP: ₹${active.mtp.toFixed(2)}`;
+                                        }
+                                    } else {
+                                        active.state = 'ACTIVE';
+                                        active.reentryCount++;
+                                        active.entryTime = t;
+                                        active.entryPrice = active.rtp;
+                                        
+                                        active.slPrice = calculateSlPrice(active.leg, active.entryPrice, true);
+                                        active.tslReferencePrice = active.entryPrice;
+
+                                        active.trades.push({
+                                            entryTime: active.entryTime, entryPrice: active.entryPrice,
+                                            exitTime: null, exitPrice: null, exitReason: null, tradePnL: 0, tradeValue: active.entryPrice * active.qty,
+                                            tradeSlPrice: active.slPrice
+                                        });
+                                        dailyTradeValue += (active.entryPrice * active.qty);
+                                        
+                                        const idxLog = active.optionDayChart.findIndex(c => c.time === t);
+                                        if (idxLog !== -1) {
+                                            const slStrLog = active.slPrice !== null ? ` | Init SL: ₹${active.slPrice.toFixed(2)}` : '';
+                                            const entrySideLog = active.leg.side === 'SELL' ? 'Sell' : 'Buy';
+                                            const actionStrLog = `Re-Entry (${entrySideLog}) [RE-HIGH]: ${active.entryPrice.toFixed(2)}${slStrLog}`;
+                                            active.optionDayChart[idxLog].action = active.optionDayChart[idxLog].action ? active.optionDayChart[idxLog].action + ' | ' + actionStrLog : actionStrLog;
+                                        }
+                                        const closePnlDiff = active.leg.side === 'SELL' ? (active.entryPrice - node.close) : (node.close - active.entryPrice);
+                                        const newTradePnL = closePnlDiff * active.qty;
+                                        active.minutePnLMap.set(t, active.lockedPnL + newTradePnL);
+                                        currentClosePnL += active.lockedPnL + newTradePnL;
+                                    }
+                                }
+                            } else if (active.leg.relow_enabled && active.reentryCount < (parseInt(active.leg.max_reentry) || 1)) {
+                                active.relowLow = exitPrice;
+                                if (node.close < active.relowLow) {
+                                    active.relowLow = node.close;
+                                }
+                                active.state = 'WAITING_FOR_RELOW_RTP';
+
+                                const mode = active.leg.relow_mode || "RELOW_PLUS_PTS";
+                                const val = parseFloat(active.leg.relow_value || 0);
+                                let rtp = active.relowLow;
+                                if (mode === "RELOW_PLUS_PCT") rtp = active.relowLow + (active.relowLow * val / 100);
+                                else if (mode === "RELOW_PLUS_PTS") rtp = active.relowLow + val;
+                                active.rtp = roundToTick(rtp);
+
+                                if (active.leg.relow_mntm_enabled) {
+                                    const mntmMode = active.leg.relow_mntm_mode || "RELOW_PLUS_PCT";
+                                    const mntmVal = parseFloat(active.leg.relow_mntm_value || 0);
+                                    let mtp = active.rtp;
+                                    if (mntmMode === "RELOW_PLUS_PCT" || mntmMode === "PLUS_PCT" || mntmMode === "PERCENTAGE") mtp = active.rtp + (active.rtp * mntmVal / 100);
+                                    else if (mntmMode === "RELOW_PLUS_PTS" || mntmMode === "PLUS_PTS" || mntmMode === "POINTS") mtp = active.rtp + mntmVal;
+                                    else if (mntmMode === "RELOW_MINUS_PCT" || mntmMode === "MINUS_PCT") mtp = active.rtp - (active.rtp * mntmVal / 100);
+                                    else if (mntmMode === "RELOW_MINUS_PTS" || mntmMode === "MINUS_PTS") mtp = active.rtp - mntmVal;
+                                    active.mtp = roundToTick(mtp);
+                                } else {
+                                    active.mtp = null;
+                                }
+
+                                currentTrade.reentryCalcStr = `Calc RTP: ₹${active.rtp.toFixed(2)}`;
+                                if (active.mtp !== null) {
+                                    currentTrade.reentryCalcStr += ` | Calc MTP: ₹${active.mtp.toFixed(2)}`;
+                                }
+
+                                const idxLogInit = active.optionDayChart.findIndex(c => c.time === t);
+                                if (idxLogInit !== -1) {
+                                    let logStr = `[RE-LOW] Initial Low: ₹${active.relowLow.toFixed(2)} | RTP: ₹${active.rtp.toFixed(2)}`;
+                                    if (active.mtp !== null) logStr += ` | MTP: ₹${active.mtp.toFixed(2)}`;
+                                    active.optionDayChart[idxLogInit].action = active.optionDayChart[idxLogInit].action ? active.optionDayChart[idxLogInit].action + ' | ' + logStr : logStr;
+                                }
+
+                                let rtpCrossed = false;
+                                if (active.rtp >= active.relowLow && active.rtp <= node.close) {
+                                    rtpCrossed = true;
+                                }
+
+                                if (rtpCrossed) {
+                                    if (active.mtp) {
+                                        active.state = 'WAITING_FOR_RELOW_MTP';
+                                        if (node.time) {
+                                            const idx = active.optionDayChart.findIndex(c => c.time === node.time);
+                                            if (idx !== -1) active.optionDayChart[idx].action = (active.optionDayChart[idx].action ? active.optionDayChart[idx].action + ' | ' : '') + `[RTP Hit] Waiting MTP: ₹${active.mtp.toFixed(2)}`;
+                                        }
+                                    } else {
+                                        active.state = 'ACTIVE';
+                                        active.reentryCount++;
+                                        active.entryTime = t;
+                                        active.entryPrice = active.rtp;
+                                        
+                                        active.slPrice = calculateSlPrice(active.leg, active.entryPrice, true);
+                                        active.tslReferencePrice = active.entryPrice;
+
+                                        active.trades.push({
+                                            entryTime: active.entryTime, entryPrice: active.entryPrice,
+                                            exitTime: null, exitPrice: null, exitReason: null, tradePnL: 0, tradeValue: active.entryPrice * active.qty,
+                                            tradeSlPrice: active.slPrice
+                                        });
+                                        dailyTradeValue += (active.entryPrice * active.qty);
+                                        
+                                        const idxLog = active.optionDayChart.findIndex(c => c.time === t);
+                                        if (idxLog !== -1) {
+                                            const slStrLog = active.slPrice !== null ? ` | Init SL: ₹${active.slPrice.toFixed(2)}` : '';
+                                            const entrySideLog = active.leg.side === 'SELL' ? 'Sell' : 'Buy';
+                                            const actionStrLog = `Re-Entry (${entrySideLog}) [RE-LOW]: ${active.entryPrice.toFixed(2)}${slStrLog}`;
+                                            active.optionDayChart[idxLog].action = active.optionDayChart[idxLog].action ? active.optionDayChart[idxLog].action + ' | ' + actionStrLog : actionStrLog;
+                                        }
+                                        const closePnlDiff = active.leg.side === 'SELL' ? (active.entryPrice - node.close) : (node.close - active.entryPrice);
+                                        const newTradePnL = closePnlDiff * active.qty;
+                                        active.minutePnLMap.set(t, active.lockedPnL + newTradePnL);
+                                        currentClosePnL += active.lockedPnL + newTradePnL;
+                                    }
+                                }
                             }
                             continue;
                         }
@@ -815,6 +975,286 @@ class BacktestEngine {
                         currentOpenPnL += active.lockedPnL;
                         currentClosePnL += active.lockedPnL;
                         active.minutePnLMap.set(t, active.lockedPnL);
+                        continue;
+                    }
+
+                    if (active.state === 'WAITING_FOR_REHIGH_RTP') {
+                        let newPeakFormed = false;
+                        if (node.high > active.rehighPeak) {
+                            active.rehighPeak = node.high;
+                            newPeakFormed = true;
+                            
+                            const mode = active.leg.rehigh_mode || "REHIGH_MINUS_PTS";
+                            const val = parseFloat(active.leg.rehigh_value || 0);
+                            let rtp = active.rehighPeak;
+                            if (mode === "REHIGH_MINUS_PCT") rtp = active.rehighPeak - (active.rehighPeak * val / 100);
+                            else if (mode === "REHIGH_MINUS_PTS") rtp = active.rehighPeak - val;
+                            active.rtp = roundToTick(rtp);
+
+                            if (active.leg.rehigh_mntm_enabled) {
+                                const mntmMode = active.leg.rehigh_mntm_mode || "REHIGH_PLUS_PCT";
+                                const mntmVal = parseFloat(active.leg.rehigh_mntm_value || 0);
+                                let mtp = active.rtp;
+                                if (mntmMode === "REHIGH_PLUS_PCT" || mntmMode === "PLUS_PCT" || mntmMode === "PERCENTAGE") mtp = active.rtp + (active.rtp * mntmVal / 100);
+                                else if (mntmMode === "REHIGH_PLUS_PTS" || mntmMode === "PLUS_PTS" || mntmMode === "POINTS") mtp = active.rtp + mntmVal;
+                                else if (mntmMode === "REHIGH_MINUS_PCT" || mntmMode === "MINUS_PCT") mtp = active.rtp - (active.rtp * mntmVal / 100);
+                                else if (mntmMode === "REHIGH_MINUS_PTS" || mntmMode === "MINUS_PTS") mtp = active.rtp - mntmVal;
+                                active.mtp = roundToTick(mtp);
+                            }
+
+                            const idxLogUpdate = active.optionDayChart.findIndex(c => c.time === t);
+                            if (idxLogUpdate !== -1) {
+                                let logStr = `[RE-HIGH] New Peak: ₹${active.rehighPeak.toFixed(2)} | RTP: ₹${active.rtp.toFixed(2)}`;
+                                if (active.mtp !== null) logStr += ` | MTP: ₹${active.mtp.toFixed(2)}`;
+                                active.optionDayChart[idxLogUpdate].action = active.optionDayChart[idxLogUpdate].action ? active.optionDayChart[idxLogUpdate].action + ' | ' + logStr : logStr;
+                            }
+                        }
+
+                        let rtpCrossed = false;
+                        if (newPeakFormed) {
+                            if (active.rtp >= node.close) {
+                                rtpCrossed = true;
+                            }
+                        } else {
+                            if (node.low <= active.rtp) {
+                                rtpCrossed = true;
+                            }
+                        }
+
+                        if (rtpCrossed) {
+                            if (active.mtp) {
+                                active.state = 'WAITING_FOR_REHIGH_MTP';
+                                if (node.time) {
+                                    const idx = active.optionDayChart.findIndex(c => c.time === node.time);
+                                    if (idx !== -1) active.optionDayChart[idx].action = (active.optionDayChart[idx].action ? active.optionDayChart[idx].action + ' | ' : '') + `[RTP Hit] Waiting MTP: ₹${active.mtp.toFixed(2)}`;
+                                }
+                                currentOpenPnL += active.lockedPnL;
+                                currentClosePnL += active.lockedPnL;
+                                active.minutePnLMap.set(t, active.lockedPnL);
+                            } else {
+                                active.state = 'ACTIVE';
+                                active.reentryCount++;
+                                active.entryTime = t;
+                                active.entryPrice = active.rtp; 
+                                
+                                active.slPrice = calculateSlPrice(active.leg, active.entryPrice, true);
+                                active.tslReferencePrice = active.entryPrice;
+
+                                active.trades.push({
+                                    entryTime: active.entryTime, entryPrice: active.entryPrice,
+                                    exitTime: null, exitPrice: null, exitReason: null, tradePnL: 0, tradeValue: active.entryPrice * active.qty,
+                                    tradeSlPrice: active.slPrice
+                                });
+                                dailyTradeValue += (active.entryPrice * active.qty);
+                                
+                                const idxLog = active.optionDayChart.findIndex(c => c.time === t);
+                                if (idxLog !== -1) {
+                                    const slStrLog = active.slPrice !== null ? ` | Init SL: ₹${active.slPrice.toFixed(2)}` : '';
+                                    const entrySideLog = active.leg.side === 'SELL' ? 'Sell' : 'Buy';
+                                    const actionStrLog = `Re-Entry (${entrySideLog}) [RE-HIGH]: ${active.entryPrice.toFixed(2)}${slStrLog}`;
+                                    active.optionDayChart[idxLog].action = active.optionDayChart[idxLog].action ? active.optionDayChart[idxLog].action + ' | ' + actionStrLog : actionStrLog;
+                                }
+                                const openPnlDiff = active.leg.side === 'SELL' ? (active.entryPrice - node.open) : (node.open - active.entryPrice);
+                                const newTradeOpenPnL = openPnlDiff * active.qty;
+                                const closePnlDiff = active.leg.side === 'SELL' ? (active.entryPrice - node.close) : (node.close - active.entryPrice);
+                                const newTradeClosePnL = closePnlDiff * active.qty;
+                                
+                                currentOpenPnL += active.lockedPnL + newTradeOpenPnL;
+                                currentClosePnL += active.lockedPnL + newTradeClosePnL;
+                                active.minutePnLMap.set(t, active.lockedPnL + newTradeClosePnL);
+                            }
+                        } else {
+                            currentOpenPnL += active.lockedPnL;
+                            currentClosePnL += active.lockedPnL;
+                            active.minutePnLMap.set(t, active.lockedPnL);
+                        }
+                        continue;
+                    }
+
+                    if (active.state === 'WAITING_FOR_REHIGH_MTP') {
+                        let mtpCrossed = false;
+                        if (active.mtp > active.rtp) { 
+                            if (node.high >= active.mtp) mtpCrossed = true;
+                        } else {
+                            if (node.low <= active.mtp) mtpCrossed = true;
+                        }
+
+                        if (mtpCrossed) {
+                            active.state = 'ACTIVE';
+                            active.reentryCount++;
+                            active.entryTime = t;
+                            active.entryPrice = active.mtp;
+                            
+                            active.slPrice = calculateSlPrice(active.leg, active.entryPrice, true);
+                            active.tslReferencePrice = active.entryPrice;
+
+                            active.trades.push({
+                                entryTime: active.entryTime, entryPrice: active.entryPrice,
+                                exitTime: null, exitPrice: null, exitReason: null, tradePnL: 0, tradeValue: active.entryPrice * active.qty,
+                                tradeSlPrice: active.slPrice
+                            });
+                            dailyTradeValue += (active.entryPrice * active.qty);
+                            
+                            const idxLog = active.optionDayChart.findIndex(c => c.time === t);
+                            if (idxLog !== -1) {
+                                const slStrLog = active.slPrice !== null ? ` | Init SL: ₹${active.slPrice.toFixed(2)}` : '';
+                                const entrySideLog = active.leg.side === 'SELL' ? 'Sell' : 'Buy';
+                                const actionStrLog = `Re-Entry (${entrySideLog}) [RE-HIGH]: ${active.entryPrice.toFixed(2)}${slStrLog}`;
+                                active.optionDayChart[idxLog].action = active.optionDayChart[idxLog].action ? active.optionDayChart[idxLog].action + ' | ' + actionStrLog : actionStrLog;
+                            }
+                            const openPnlDiff = active.leg.side === 'SELL' ? (active.entryPrice - node.open) : (node.open - active.entryPrice);
+                            const newTradeOpenPnL = openPnlDiff * active.qty;
+                            const closePnlDiff = active.leg.side === 'SELL' ? (active.entryPrice - node.close) : (node.close - active.entryPrice);
+                            const newTradeClosePnL = closePnlDiff * active.qty;
+                            
+                            currentOpenPnL += active.lockedPnL + newTradeOpenPnL;
+                            currentClosePnL += active.lockedPnL + newTradeClosePnL;
+                            active.minutePnLMap.set(t, active.lockedPnL + newTradeClosePnL);
+                        } else {
+                            currentOpenPnL += active.lockedPnL;
+                            currentClosePnL += active.lockedPnL;
+                            active.minutePnLMap.set(t, active.lockedPnL);
+                        }
+                        continue;
+                    }
+
+                    if (active.state === 'WAITING_FOR_RELOW_RTP') {
+                        let newLowFormed = false;
+                        if (node.low < active.relowLow) {
+                            active.relowLow = node.low;
+                            newLowFormed = true;
+                            
+                            const mode = active.leg.relow_mode || "RELOW_PLUS_PTS";
+                            const val = parseFloat(active.leg.relow_value || 0);
+                            let rtp = active.relowLow;
+                            if (mode === "RELOW_PLUS_PCT") rtp = active.relowLow + (active.relowLow * val / 100);
+                            else if (mode === "RELOW_PLUS_PTS") rtp = active.relowLow + val;
+                            active.rtp = roundToTick(rtp);
+
+                            if (active.leg.relow_mntm_enabled) {
+                                const mntmMode = active.leg.relow_mntm_mode || "RELOW_PLUS_PCT";
+                                const mntmVal = parseFloat(active.leg.relow_mntm_value || 0);
+                                let mtp = active.rtp;
+                                if (mntmMode === "RELOW_PLUS_PCT" || mntmMode === "PLUS_PCT" || mntmMode === "PERCENTAGE") mtp = active.rtp + (active.rtp * mntmVal / 100);
+                                else if (mntmMode === "RELOW_PLUS_PTS" || mntmMode === "PLUS_PTS" || mntmMode === "POINTS") mtp = active.rtp + mntmVal;
+                                else if (mntmMode === "RELOW_MINUS_PCT" || mntmMode === "MINUS_PCT") mtp = active.rtp - (active.rtp * mntmVal / 100);
+                                else if (mntmMode === "RELOW_MINUS_PTS" || mntmMode === "MINUS_PTS") mtp = active.rtp - mntmVal;
+                                active.mtp = roundToTick(mtp);
+                            }
+
+                            const idxLogUpdate = active.optionDayChart.findIndex(c => c.time === t);
+                            if (idxLogUpdate !== -1) {
+                                let logStr = `[RE-LOW] New Low: ₹${active.relowLow.toFixed(2)} | RTP: ₹${active.rtp.toFixed(2)}`;
+                                if (active.mtp !== null) logStr += ` | MTP: ₹${active.mtp.toFixed(2)}`;
+                                active.optionDayChart[idxLogUpdate].action = active.optionDayChart[idxLogUpdate].action ? active.optionDayChart[idxLogUpdate].action + ' | ' + logStr : logStr;
+                            }
+                        }
+
+                        let rtpCrossed = false;
+                        if (newLowFormed) {
+                            if (active.rtp <= node.close) {
+                                rtpCrossed = true;
+                            }
+                        } else {
+                            if (node.high >= active.rtp) {
+                                rtpCrossed = true;
+                            }
+                        }
+
+                        if (rtpCrossed) {
+                            if (active.mtp) {
+                                active.state = 'WAITING_FOR_RELOW_MTP';
+                                if (node.time) {
+                                    const idx = active.optionDayChart.findIndex(c => c.time === node.time);
+                                    if (idx !== -1) active.optionDayChart[idx].action = (active.optionDayChart[idx].action ? active.optionDayChart[idx].action + ' | ' : '') + `[RTP Hit] Waiting MTP: ₹${active.mtp.toFixed(2)}`;
+                                }
+                                currentOpenPnL += active.lockedPnL;
+                                currentClosePnL += active.lockedPnL;
+                                active.minutePnLMap.set(t, active.lockedPnL);
+                            } else {
+                                active.state = 'ACTIVE';
+                                active.reentryCount++;
+                                active.entryTime = t;
+                                active.entryPrice = active.rtp; 
+                                
+                                active.slPrice = calculateSlPrice(active.leg, active.entryPrice, true);
+                                active.tslReferencePrice = active.entryPrice;
+
+                                active.trades.push({
+                                    entryTime: active.entryTime, entryPrice: active.entryPrice,
+                                    exitTime: null, exitPrice: null, exitReason: null, tradePnL: 0, tradeValue: active.entryPrice * active.qty,
+                                    tradeSlPrice: active.slPrice
+                                });
+                                dailyTradeValue += (active.entryPrice * active.qty);
+                                
+                                const idxLog = active.optionDayChart.findIndex(c => c.time === t);
+                                if (idxLog !== -1) {
+                                    const slStrLog = active.slPrice !== null ? ` | Init SL: ₹${active.slPrice.toFixed(2)}` : '';
+                                    const entrySideLog = active.leg.side === 'SELL' ? 'Sell' : 'Buy';
+                                    const actionStrLog = `Re-Entry (${entrySideLog}) [RE-LOW]: ${active.entryPrice.toFixed(2)}${slStrLog}`;
+                                    active.optionDayChart[idxLog].action = active.optionDayChart[idxLog].action ? active.optionDayChart[idxLog].action + ' | ' + actionStrLog : actionStrLog;
+                                }
+                                const openPnlDiff = active.leg.side === 'SELL' ? (active.entryPrice - node.open) : (node.open - active.entryPrice);
+                                const newTradeOpenPnL = openPnlDiff * active.qty;
+                                const closePnlDiff = active.leg.side === 'SELL' ? (active.entryPrice - node.close) : (node.close - active.entryPrice);
+                                const newTradeClosePnL = closePnlDiff * active.qty;
+                                
+                                currentOpenPnL += active.lockedPnL + newTradeOpenPnL;
+                                currentClosePnL += active.lockedPnL + newTradeClosePnL;
+                                active.minutePnLMap.set(t, active.lockedPnL + newTradeClosePnL);
+                            }
+                        } else {
+                            currentOpenPnL += active.lockedPnL;
+                            currentClosePnL += active.lockedPnL;
+                            active.minutePnLMap.set(t, active.lockedPnL);
+                        }
+                        continue;
+                    }
+
+                    if (active.state === 'WAITING_FOR_RELOW_MTP') {
+                        let mtpCrossed = false;
+                        if (active.mtp < active.rtp) { 
+                            if (node.low <= active.mtp) mtpCrossed = true;
+                        } else {
+                            if (node.high >= active.mtp) mtpCrossed = true;
+                        }
+
+                        if (mtpCrossed) {
+                            active.state = 'ACTIVE';
+                            active.reentryCount++;
+                            active.entryTime = t;
+                            active.entryPrice = active.mtp;
+                            
+                            active.slPrice = calculateSlPrice(active.leg, active.entryPrice, true);
+                            active.tslReferencePrice = active.entryPrice;
+
+                            active.trades.push({
+                                entryTime: active.entryTime, entryPrice: active.entryPrice,
+                                exitTime: null, exitPrice: null, exitReason: null, tradePnL: 0, tradeValue: active.entryPrice * active.qty,
+                                tradeSlPrice: active.slPrice
+                            });
+                            dailyTradeValue += (active.entryPrice * active.qty);
+                            
+                            const idxLog = active.optionDayChart.findIndex(c => c.time === t);
+                            if (idxLog !== -1) {
+                                const slStrLog = active.slPrice !== null ? ` | Init SL: ₹${active.slPrice.toFixed(2)}` : '';
+                                const entrySideLog = active.leg.side === 'SELL' ? 'Sell' : 'Buy';
+                                const actionStrLog = `Re-Entry (${entrySideLog}) [RE-LOW]: ${active.entryPrice.toFixed(2)}${slStrLog}`;
+                                active.optionDayChart[idxLog].action = active.optionDayChart[idxLog].action ? active.optionDayChart[idxLog].action + ' | ' + actionStrLog : actionStrLog;
+                            }
+                            const openPnlDiff = active.leg.side === 'SELL' ? (active.entryPrice - node.open) : (node.open - active.entryPrice);
+                            const newTradeOpenPnL = openPnlDiff * active.qty;
+                            const closePnlDiff = active.leg.side === 'SELL' ? (active.entryPrice - node.close) : (node.close - active.entryPrice);
+                            const newTradeClosePnL = closePnlDiff * active.qty;
+                            
+                            currentOpenPnL += active.lockedPnL + newTradeOpenPnL;
+                            currentClosePnL += active.lockedPnL + newTradeClosePnL;
+                            active.minutePnLMap.set(t, active.lockedPnL + newTradeClosePnL);
+                        } else {
+                            currentOpenPnL += active.lockedPnL;
+                            currentClosePnL += active.lockedPnL;
+                            active.minutePnLMap.set(t, active.lockedPnL);
+                        }
                         continue;
                     }
 
