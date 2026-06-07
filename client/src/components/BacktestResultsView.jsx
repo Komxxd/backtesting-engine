@@ -3,6 +3,7 @@ import { X, TrendingUp, TrendingDown, Clock, Activity, CalendarDays, Settings2, 
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { StrategyConfigModal } from './StrategyConfigModal';
+import { TradesSummaryTable } from './TradesSummaryTable';
 
 export const BacktestResultsView = ({ results, strategy }) => {
     const { totalPnL, dailySummary, chartData, trades } = results || {};
@@ -1135,6 +1136,7 @@ export const BacktestResultsView = ({ results, strategy }) => {
                                         </div>
                                     </div>
                                 )}
+                                <TradesSummaryTable trades={trades} filteredDailySummary={filteredDailySummary} />
                             </div>
                         ) : (
                             <>
