@@ -83,6 +83,53 @@ class BacktestEngine {
         return Math.round(spotPrice / step) * step;
     }
 
+    async getOptionPriceAtTime(indexName, year, month, expiry, date, strike, optionType, timeStr) {
+        const filePath = path.join(__dirname, `../../../../market-data/options/${indexName}/${year}/${month}/expiry=${expiry}/date=${date}/${strike}_${optionType}.parquet`);
+        const data = await this.readParquetFile(filePath);
+        if (!data || data.length === 0) return null;
+        
+        const row = data.find(r => this.extractTimeOption(r) === timeStr);
+        if (row) return row[6]; // Open price is index 6
+        return null;
+    }
+
+    async findClosestPremiumStrike(indexName, year, month, expiry, date, atmStrike, step, optionType, targetPremium, entryTime) {
+        let currentStrike = atmStrike;
+        let currentPrice = await this.getOptionPriceAtTime(indexName, year, month, expiry, date, currentStrike, optionType, entryTime);
+        
+        if (currentPrice === null) return atmStrike; 
+
+        let bestStrike = currentStrike;
+        let minDiff = Math.abs(currentPrice - targetPremium);
+        
+        let direction = 1; 
+        if (currentPrice > targetPremium) {
+            direction = optionType === 'CE' ? 1 : -1;
+        } else {
+            direction = optionType === 'CE' ? -1 : 1;
+        }
+
+        for (let i = 1; i <= 20; i++) {
+            const nextStrike = currentStrike + (direction * step);
+            const nextPrice = await this.getOptionPriceAtTime(indexName, year, month, expiry, date, nextStrike, optionType, entryTime);
+            
+            if (nextPrice === null) break;
+            
+            const diff = Math.abs(nextPrice - targetPremium);
+            
+            if (diff < minDiff) {
+                minDiff = diff;
+                bestStrike = nextStrike;
+            }
+            
+            if (diff > minDiff) break;
+            
+            currentStrike = nextStrike;
+        }
+        
+        return bestStrike;
+    }
+
     findClosestExpiry(indexName, dateStr) {
         const [year, month] = dateStr.split('-');
         const monthDir = path.join(__dirname, `../../../../market-data/options/${indexName}/${year}/${month}`);
@@ -180,7 +227,11 @@ class BacktestEngine {
                 const offset = match && match[2] ? parseInt(match[2]) : 0;
                 
                 let targetStrike = atmStrike;
-                if (type === "OTM") {
+                if (leg.strike_criteria === 'CLOSEST_PREMIUM') {
+                    const targetPremium = parseFloat(leg.premium) || 0;
+                    targetStrike = await this.findClosestPremiumStrike(indexName, year, month, expiry, date, atmStrike, step, leg.option_type, targetPremium, entryTime);
+                    console.log(`    -> Closest Premium for ₹${targetPremium} found at strike ${targetStrike}_${leg.option_type}`);
+                } else if (type === "OTM") {
                     targetStrike = leg.option_type === "CE" ? atmStrike + (offset * step) : atmStrike - (offset * step);
                 } else if (type === "ITM") {
                     targetStrike = leg.option_type === "CE" ? atmStrike - (offset * step) : atmStrike + (offset * step);
@@ -715,7 +766,11 @@ class BacktestEngine {
                                     const offset = match && match[2] ? parseInt(match[2]) : 0;
                                     
                                     let newTargetStrike = newAtmStrike;
-                                    if (type === "OTM") {
+                                    if (active.leg.strike_criteria === 'CLOSEST_PREMIUM') {
+                                        const targetPremium = parseFloat(active.leg.premium) || 0;
+                                        newTargetStrike = await this.findClosestPremiumStrike(indexName, year, month, expiry, date, newAtmStrike, step, active.leg.option_type, targetPremium, t);
+                                        console.log(`    -> [RE-ASAP] Closest Premium for ₹${targetPremium} found at strike ${newTargetStrike}_${active.leg.option_type}`);
+                                    } else if (type === "OTM") {
                                         newTargetStrike = active.leg.option_type === "CE" ? newAtmStrike + (offset * step) : newAtmStrike - (offset * step);
                                     } else if (type === "ITM") {
                                         newTargetStrike = active.leg.option_type === "CE" ? newAtmStrike - (offset * step) : newAtmStrike + (offset * step);
@@ -748,7 +803,11 @@ class BacktestEngine {
                                     const offset = match && match[2] ? parseInt(match[2]) : 0;
                                     
                                     let newTargetStrike = newAtmStrike;
-                                    if (type === "OTM") {
+                                    if (active.lazyLegConfig.strike_criteria === 'CLOSEST_PREMIUM') {
+                                        const targetPremium = parseFloat(active.lazyLegConfig.premium) || 0;
+                                        newTargetStrike = await this.findClosestPremiumStrike(indexName, year, month, expiry, date, newAtmStrike, step, active.lazyLegConfig.option_type, targetPremium, t);
+                                        console.log(`    -> [LAZY LEG] Closest Premium for ₹${targetPremium} found at strike ${newTargetStrike}_${active.lazyLegConfig.option_type}`);
+                                    } else if (type === "OTM") {
                                         newTargetStrike = active.lazyLegConfig.option_type === "CE" ? newAtmStrike + (offset * step) : newAtmStrike - (offset * step);
                                     } else if (type === "ITM") {
                                         newTargetStrike = active.lazyLegConfig.option_type === "CE" ? newAtmStrike - (offset * step) : newAtmStrike + (offset * step);
