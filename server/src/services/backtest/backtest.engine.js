@@ -731,6 +731,41 @@ class BacktestEngine {
                                         active.optionDayChart[idxLogInit].action = active.optionDayChart[idxLogInit].action ? active.optionDayChart[idxLogInit].action + ' | ' + logStr : logStr;
                                     }
                                 }
+                            } else if (active.leg.lazy_leg_enabled && active.leg.lazy_leg) {
+                                active.state = 'WAITING_FOR_LAZY';
+                                active.lazyLegConfig = { ...active.leg.lazy_leg };
+                                const currentTrade = active.trades[active.trades.length - 1];
+                                
+                                let lazyTargetStrikeStr = '';
+                                const indexRow = indexChartMap.get(t);
+                                if (indexRow) {
+                                    const closeSpot = indexRow.close;
+                                    const newAtmStrike = this.calculateATM(closeSpot, step);
+                                    
+                                    const strikeStr = active.lazyLegConfig.strike || active.lazyLegConfig.strike_selection || "ATM";
+                                    const match = strikeStr.match(/^([A-Z]+)(\d*)$/);
+                                    const type = match ? match[1] : "ATM";
+                                    const offset = match && match[2] ? parseInt(match[2]) : 0;
+                                    
+                                    let newTargetStrike = newAtmStrike;
+                                    if (type === "OTM") {
+                                        newTargetStrike = active.lazyLegConfig.option_type === "CE" ? newAtmStrike + (offset * step) : newAtmStrike - (offset * step);
+                                    } else if (type === "ITM") {
+                                        newTargetStrike = active.lazyLegConfig.option_type === "CE" ? newAtmStrike - (offset * step) : newAtmStrike + (offset * step);
+                                    }
+                                    
+                                    active.lazyNextStrike = newTargetStrike;
+                                    lazyTargetStrikeStr = `${newTargetStrike}_${active.lazyLegConfig.option_type}`;
+                                    currentTrade.reentryCalcStr = `Spot: ${closeSpot.toFixed(2)} | Target Strike: ${lazyTargetStrikeStr}`;
+                                } else {
+                                    currentTrade.reentryCalcStr = `Prepared Lazy Leg: ${active.lazyLegConfig.option_type}`;
+                                }
+                                
+                                const idxLogInit = active.optionDayChart.findIndex(c => c.time === t);
+                                if (idxLogInit !== -1) {
+                                    const logStr = lazyTargetStrikeStr ? `[LAZY LEG] Triggered Lazy Leg: ${lazyTargetStrikeStr}` : `[LAZY LEG] Triggered Lazy Leg: ${active.lazyLegConfig.option_type}`;
+                                    active.optionDayChart[idxLogInit].action = active.optionDayChart[idxLogInit].action ? active.optionDayChart[idxLogInit].action + ' | ' + logStr : logStr;
+                                }
                             }
                             continue;
                         }
@@ -1409,6 +1444,121 @@ class BacktestEngine {
                         continue;
                     }
 
+                    if (active.state === 'WAITING_FOR_LAZY') {
+                        const newTargetStrike = active.lazyNextStrike || active.targetStrike;
+
+                        const optionFilePath = path.join(__dirname, `../../../../market-data/options/${indexName}/${year}/${month}/expiry=${expiry}/date=${date}/${newTargetStrike}_${active.lazyLegConfig.option_type}.parquet`);
+                        const newOptionData = await this.readParquetFile(optionFilePath);
+                        
+                        if (newOptionData.length > 0) {
+                            if (!active.historicalCharts) active.historicalCharts = [];
+                            
+                            const baselinePnL = active.strikeBaselinePnL || 0;
+                            const slTime = active.trades[active.trades.length - 1]?.exitTime || t;
+                            const oldChart = active.optionDayChart.map(node => {
+                                let pnl = 0;
+                                if (active.minutePnLMap && active.minutePnLMap.has(node.time)) pnl = active.minutePnLMap.get(node.time) - baselinePnL;
+                                return { ...node, pnl };
+                            }).filter(node => node.time >= (active.strikeStartTime || entryTime) && node.time <= slTime);
+                            
+                            const phaseSuffix = active.historicalCharts.length > 0 ? ` (Leg ${active.historicalCharts.length + 1})` : ' (Leg 1)';
+                            active.historicalCharts.push({
+                                key: `${active.targetStrike}_${active.leg.option_type}${phaseSuffix}`,
+                                chart: oldChart,
+                                endTime: t
+                            });
+                            
+                            active.strikeStartTime = t;
+                            active.strikeBaselinePnL = active.lockedPnL;
+
+                            active.leg = active.lazyLegConfig;
+                            active.qty = active.leg.lots * lotsize * multiplier;
+                            active.targetStrike = newTargetStrike;
+                            active.optionData = newOptionData;
+                            active.lazyLegConfig = null;
+                            
+                            const newChartMap = new Map();
+                            const newOptionDayChart = newOptionData.map(row => {
+                                const time = this.extractTimeOption(row);
+                                const mapped = { time, open: row[6], high: row[4], low: row[5], close: row[0], action: null };
+                                if (time) newChartMap.set(time, mapped);
+                                return mapped;
+                            });
+                            active.chartMap = newChartMap;
+                            active.optionDayChart = newOptionDayChart;
+                            
+                            const newNode = active.chartMap.get(t);
+                            if (newNode) {
+                                if (active.leg.simple_mntm_enabled) {
+                                    active.state = 'WAITING_FOR_MNTM';
+                                    const basePrice = newNode.open;
+                                    let mtp = null;
+                                    let mMode = active.leg.simple_mntm_mode || 'SIMPLE_PLUS_PCT';
+                                    let mVal = parseFloat(active.leg.simple_mntm_value || 0);
+                                    
+                                    if (mMode.includes("PLUS_PCT")) mtp = basePrice + (basePrice * mVal / 100);
+                                    else if (mMode.includes("PLUS_PTS")) mtp = basePrice + mVal;
+                                    else if (mMode.includes("MINUS_PCT")) mtp = basePrice - (basePrice * mVal / 100);
+                                    else if (mMode.includes("MINUS_PTS")) mtp = basePrice - mVal;
+                                    
+                                    active.mtp = roundToTick(mtp);
+                                    
+                                    const idxLogUpdate = active.optionDayChart.findIndex(c => c.time === t);
+                                    if (idxLogUpdate !== -1) {
+                                        active.optionDayChart[idxLogUpdate].action = (active.optionDayChart[idxLogUpdate].action ? active.optionDayChart[idxLogUpdate].action + ' | ' : '') + `[LAZY LEG] Waiting MNTM: ₹${active.mtp.toFixed(2)}`;
+                                    }
+                                    
+                                    currentOpenPnL += active.lockedPnL;
+                                    currentClosePnL += active.lockedPnL;
+                                    active.minutePnLMap.set(t, active.lockedPnL);
+                                    continue;
+                                } else {
+                                    active.state = 'ACTIVE';
+                                    active.reentryCount = 0; 
+                                    active.entryTime = t;
+                                    active.entryPrice = newNode.open;
+                                    
+                                    active.slPrice = calculateSlPrice(active.leg, active.entryPrice, false);
+                                    active.tslReferencePrice = active.entryPrice;
+                                    
+                                    active.trades.push({
+                                        entryTime: active.entryTime, entryPrice: active.entryPrice,
+                                        exitTime: null, exitPrice: null, exitReason: null, tradePnL: 0, tradeValue: active.entryPrice * active.qty,
+                                        tradeSlPrice: active.slPrice
+                                    });
+                                    dailyTradeValue += (active.entryPrice * active.qty);
+                                    
+                                    const idxLog = active.optionDayChart.findIndex(c => c.time === t);
+                                    if (idxLog !== -1) {
+                                        const slStrLog = active.slPrice !== null ? ` | Init SL: ₹${active.slPrice.toFixed(2)}` : '';
+                                        const entrySideLog = active.leg.side === 'SELL' ? 'Sell' : 'Buy';
+                                        const actionStrLog = `Initial Entry (${entrySideLog}) [LAZY LEG]: ${active.entryPrice.toFixed(2)}${slStrLog}`;
+                                        active.optionDayChart[idxLog].action = active.optionDayChart[idxLog].action ? active.optionDayChart[idxLog].action + ' | ' + actionStrLog : actionStrLog;
+                                    }
+                                    
+                                    const openPnlDiff = active.leg.side === 'SELL' ? (active.entryPrice - newNode.open) : (newNode.open - active.entryPrice);
+                                    const newTradeOpenPnL = openPnlDiff * active.qty;
+                                    const closePnlDiff = active.leg.side === 'SELL' ? (active.entryPrice - newNode.close) : (newNode.close - active.entryPrice);
+                                    const newTradeClosePnL = closePnlDiff * active.qty;
+                                    
+                                    currentOpenPnL += active.lockedPnL + newTradeOpenPnL;
+                                    currentClosePnL += active.lockedPnL + newTradeClosePnL;
+                                    active.minutePnLMap.set(t, active.lockedPnL + newTradeClosePnL);
+                                    continue;
+                                }
+                            } else {
+                                console.log(`    -> LAZY LEG Missing new option data row at time ${t}`);
+                            }
+                        } else {
+                            console.log(`    -> LAZY LEG Missing option data for new strike: ${newTargetStrike}_${active.lazyLegConfig.option_type}`);
+                        }
+                        
+                        currentOpenPnL += active.lockedPnL;
+                        currentClosePnL += active.lockedPnL;
+                        active.minutePnLMap.set(t, active.lockedPnL);
+                        continue;
+                    }
+
                     if (active.state === 'ACTIVE') {
                         const openPrice = node.open;
                         const closePrice = node.close; 
@@ -1591,10 +1741,23 @@ class BacktestEngine {
             });
             dayChart['OVERALL_PNL'] = fullDayOverallPnLChart;
             
-            // Calculate DTE
-            const dateObj = new Date(date);
+            // Calculate DTE by counting valid trading days (index files) between date (exclusive) and expiry (inclusive)
+            let dte = 0;
+            let currentTemp = new Date(date);
+            currentTemp.setDate(currentTemp.getDate() + 1); // Start from the day after the current date
             const expiryObj = new Date(expiry);
-            const dte = Math.round((expiryObj - dateObj) / (1000 * 60 * 60 * 24));
+            
+            while (currentTemp <= expiryObj) {
+                const tempDateStr = currentTemp.toISOString().split('T')[0];
+                const [tempYear, tempMonth] = tempDateStr.split('-');
+                const tempIndexFilePath = path.join(__dirname, `../../../../market-data/index/${indexName}/${tempYear}/${tempMonth}/${tempDateStr}.parquet`);
+                
+                if (fs.existsSync(tempIndexFilePath)) {
+                    dte++;
+                }
+                currentTemp.setDate(currentTemp.getDate() + 1);
+            }
+
 
             this.results.dailySummary[date] = {
                 pnl: dailyPnL,
